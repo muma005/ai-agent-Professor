@@ -1,0 +1,5 @@
+[project]
+name = "professor-agent"
+version = "1.0.0"
+description = "Stateful Hierarchical Multi-Agent Graph for production-grade data science"
+requires-python = ">=3.11"

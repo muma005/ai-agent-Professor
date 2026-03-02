@@ -1,0 +1,17 @@
+# .pre-commit-config.yaml
+repos:
+  - repo: local
+    hooks:
+      - id: contract-tests
+        name: Contract tests
+        entry: pytest tests/contracts/ -x -q --tb=short
+        language: system
+        pass_filenames: false
+        stages: [commit]
+
+      - id: regression-tests
+        name: Regression suite
+        entry: pytest tests/regression/ -x -q --tb=short
+        language: system
+        pass_filenames: false
+        stages: [commit]

@@ -2,22 +2,36 @@
 
 import os
 from dotenv import load_dotenv
-from groq import Groq
+from openai import OpenAI
 import google.generativeai as genai
-import requests
 import json
 
 load_dotenv()
 
 # ── Clients ───────────────────────────────────────────────────────
-_groq_client = None
+_fireworks_deepseek_client = None
+_fireworks_glm_client = None
 _gemini_configured = False
 
-def _get_groq():
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    return _groq_client
+FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
+
+def _get_fireworks_deepseek():
+    global _fireworks_deepseek_client
+    if _fireworks_deepseek_client is None:
+        _fireworks_deepseek_client = OpenAI(
+            api_key=os.getenv("FIREWORKS_API_KEY"),
+            base_url=FIREWORKS_BASE_URL
+        )
+    return _fireworks_deepseek_client
+
+def _get_fireworks_glm():
+    global _fireworks_glm_client
+    if _fireworks_glm_client is None:
+        _fireworks_glm_client = OpenAI(
+            api_key=os.getenv("FIREWORKS_GLM_API_KEY"),
+            base_url=FIREWORKS_BASE_URL
+        )
+    return _fireworks_glm_client
 
 def _get_gemini(model_name: str):
     global _gemini_configured
@@ -39,74 +53,82 @@ If pandas is required for a specific library call:
 def call_llm(
     prompt: str,
     system: str = "",
-    model: str = "groq-deepseek",
+    model: str = "deepseek",
     max_tokens: int = 4096,
     is_coding_task: bool = False
 ) -> str:
     """
-    Unified LLM interface. All agents call this. Never call Groq/Gemini directly.
+    Unified LLM interface. All agents call this. Never call Fireworks/Gemini directly.
 
     Models:
-      "groq-deepseek"  → DeepSeek-R1 70B on Groq (default, all reasoning agents)
-      "groq-llama"     → Llama 3.3 70B on Groq (routing, fast tasks)
-      "gemini-flash"   → Gemini 2.0 Flash (Publisher, QA Gate)
-      "ollama"         → DeepSeek-R1 14b local (fallback only)
+      "deepseek"     -> DeepSeek-R1 on Fireworks (default, all reasoning agents)
+      "glm"          -> GLM on Fireworks (routing, fast tasks)
+      "gemini-flash" -> Gemini 2.0 Flash (Publisher, QA Gate)
     """
 
     # Inject Polars constraint into all coding task prompts
     if is_coding_task:
         system = POLARS_CONSTRAINT + "\n\n" + system
 
-    # ── Groq: DeepSeek-R1 70B ─────────────────────────────────────
-    if model == "groq-deepseek":
+    # ── Fireworks: DeepSeek ────────────────────────────────────────
+    if model == "deepseek":
         try:
-            return _call_groq(
+            return _call_fireworks_deepseek(
                 prompt=prompt,
                 system=system,
-                model_name="deepseek-r1-distill-llama-70b",
                 max_tokens=max_tokens
             )
         except Exception as e:
-            print(f"[llm_client] Groq DeepSeek failed: {e}. Falling back to Gemini.")
+            print(f"[llm_client] Fireworks DeepSeek failed: {e}. Falling back to Gemini.")
             return _call_gemini(prompt, system, max_tokens)
 
-    # ── Groq: Llama 3.3 70B ───────────────────────────────────────
-    elif model == "groq-llama":
+    # ── Fireworks: GLM ─────────────────────────────────────────────
+    elif model == "glm":
         try:
-            return _call_groq(
+            return _call_fireworks_glm(
                 prompt=prompt,
                 system=system,
-                model_name="llama-3.3-70b-versatile",
                 max_tokens=max_tokens
             )
         except Exception as e:
-            print(f"[llm_client] Groq Llama failed: {e}. Falling back to DeepSeek.")
-            return _call_groq(prompt, system, "deepseek-r1-distill-llama-70b", max_tokens)
+            print(f"[llm_client] Fireworks GLM failed: {e}. Falling back to DeepSeek.")
+            return _call_fireworks_deepseek(prompt, system, max_tokens)
 
     # ── Gemini 2.0 Flash ──────────────────────────────────────────
     elif model == "gemini-flash":
         try:
             return _call_gemini(prompt, system, max_tokens)
         except Exception as e:
-            print(f"[llm_client] Gemini failed: {e}. Falling back to Groq.")
-            return _call_groq(prompt, system, "deepseek-r1-distill-llama-70b", max_tokens)
-
-    # ── Ollama local fallback ──────────────────────────────────────
-    elif model == "ollama":
-        return _call_ollama(prompt, system)
+            print(f"[llm_client] Gemini failed: {e}. Falling back to DeepSeek.")
+            return _call_fireworks_deepseek(prompt, system, max_tokens)
 
     else:
-        raise ValueError(f"Unknown model: {model}. Use groq-deepseek, groq-llama, gemini-flash, or ollama.")
+        raise ValueError(f"Unknown model: {model}. Use deepseek, glm, or gemini-flash.")
 
 
-def _call_groq(prompt: str, system: str, model_name: str, max_tokens: int) -> str:
+def _call_fireworks_deepseek(prompt: str, system: str, max_tokens: int) -> str:
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    response = _get_groq().chat.completions.create(
-        model=model_name,
+    response = _get_fireworks_deepseek().chat.completions.create(
+        model="accounts/fireworks/models/deepseek-v3p2",
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=0.1
+    )
+    return response.choices[0].message.content
+
+
+def _call_fireworks_glm(prompt: str, system: str, max_tokens: int) -> str:
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    response = _get_fireworks_glm().chat.completions.create(
+        model="accounts/fireworks/models/glm-5",
         messages=messages,
         max_tokens=max_tokens,
         temperature=0.1
@@ -122,18 +144,3 @@ def _call_gemini(prompt: str, system: str, max_tokens: int) -> str:
         generation_config={"max_output_tokens": max_tokens, "temperature": 0.1}
     )
     return response.text
-
-
-def _call_ollama(prompt: str, system: str) -> str:
-    payload = {
-        "model": "deepseek-r1:14b",
-        "messages": [],
-        "stream": False
-    }
-    if system:
-        payload["messages"].append({"role": "system", "content": system})
-    payload["messages"].append({"role": "user", "content": prompt})
-
-    response = requests.post("http://localhost:11434/api/chat", json=payload)
-    response.raise_for_status()
-    return response.json()["message"]["content"]

@@ -1,0 +1,6 @@
+PassengerId,HomePlanet,Age,RoomService,Transported
+0001_01,Europa,39.0,0.0,false
+0002_01,Earth,24.0,109.0,true
+0003_01,,,,true
+0004_01,Mars,58.0,43.0,false
+0005_01,Earth,33.0,0.0,true

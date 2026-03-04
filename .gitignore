@@ -7,6 +7,9 @@ __pycache__/
 data/
 memory/chroma/
 outputs/models/
+outputs/test-*
+outputs/output_test_*
+outputs/spaceshi_*
 .DS_Store
 mlruns/
 *.db

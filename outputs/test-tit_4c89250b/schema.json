@@ -1,0 +1,19 @@
+{
+  "missing_rates": {
+    "PassengerId": 0.0,
+    "HomePlanet": 0.0,
+    "Age": 0.0,
+    "RoomService": 0.0,
+    "Transported": 0.0
+  },
+  "dtypes": {
+    "PassengerId": "String",
+    "HomePlanet": "String",
+    "Age": "Float64",
+    "RoomService": "Float64",
+    "Transported": "Boolean"
+  },
+  "row_count": 5,
+  "column_count": 5,
+  "cleaned_at": "2026-03-04T05:13:28.277225"
+}

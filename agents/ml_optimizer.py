@@ -234,6 +234,17 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
 
     print(f"[MLOptimizer] Complete.")
 
+    # ── Log lineage ──────────────────────────────────────────────
+    from core.lineage import log_event
+    log_event(
+        session_id=session_id,
+        agent="ml_optimizer",
+        action="trained_and_scored",
+        keys_read=["clean_data_path", "schema_path"],
+        keys_written=["model_registry", "cv_mean", "oof_predictions_path"],
+        values_changed={"cv_mean": cv_mean, "cv_std": cv_std},
+    )
+
     return {
         **state,
         "cv_scores":            fold_scores,

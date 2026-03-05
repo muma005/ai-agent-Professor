@@ -2,6 +2,67 @@
 
 ---
 
+## Day 4 -- 2026-03-04
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (27/27 contract tests pass)
+
+**The ONE thing for today:**
+Feed cleaned.parquet into ml_optimizer.py and get a real CV score.
+
+**Tasks completed:**
+- [x] core/metric_contract.py -- scorer registry, MetricContract dataclass
+- [x] agents/ml_optimizer.py -- v0 LightGBM, StratifiedKFold(5), AUC scoring
+- [x] Contract test: test_ml_optimizer_contract.py (18 tests, IMMUTABLE)
+- [x] End-to-end smoke test: Data Engineer -> ML Optimizer on Spaceship Titanic
+
+**CV score today:** 0.8798 (+/- 0.0055) -- 5-fold AUC, default LightGBM
+**Public LB score:** 0.79424 (Submission 0, Day 2 -- accuracy metric)
+**Fold scores:** [0.8859, 0.8764, 0.8824, 0.8836, 0.8709]
+
+**What broke:**
+- Tiny fixture (5 rows) too small for StratifiedKFold(5) -- expanded to 50 rows with learnable signal
+- Sandbox can't import project modules -- moved profiling outside sandbox
+
+**How it was fixed:**
+- Generated 50-row fixture with structured signal (high spenders + young -> transported)
+- Sandbox does only Polars cleaning; run_data_engineer calls profile_data outside sandbox
+
+**Tomorrow's ONE thing:**
+Build agents/semantic_router.py v0 + core/professor.py -- first time main.py run does something real.
+
+**Final commit hash:** 706d67b
+
+---
+
+## Day 3 -- 2026-03-04
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (12/12 contract tests pass)
+
+**The ONE thing for today:**
+Feed train.csv into data_engineer.py and get cleaned.parquet + schema.json.
+
+**Tasks completed:**
+- [x] tools/data_tools.py -- Polars I/O layer (read/write/profile/hash/validate)
+- [x] agents/data_engineer.py -- LangGraph node with sandbox + retry loop
+- [x] Contract test: test_data_engineer_contract.py (15 tests, IMMUTABLE)
+- [x] Verified on real Spaceship Titanic data (8693 rows, 0 nulls after cleaning)
+
+**CV score today:** N/A (optimizer not built yet)
+
+**What broke:**
+- Sandbox _safe_import blocks project module imports inside sandbox code
+
+**How it was fixed:**
+- Sandbox uses only inline Polars calls; profile_data + write_json called outside sandbox
+
+**Final commit hash:** 73fa97d
+
+---
+
 ## Day 2 -- 2026-03-03
 
 **Schedule status:** ON TRACK

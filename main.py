@@ -62,6 +62,7 @@ Examples:
 
 def _run(args):
     from core.state import initial_state
+    from core.professor import run_professor
 
     # Validate data path
     if not os.path.exists(args.data):
@@ -75,17 +76,19 @@ def _run(args):
         task_type=args.task_type
     )
 
-    print(f"[Professor] Starting session: {state['session_id']}")
-    print(f"[Professor] Competition:      {state['competition_name']}")
-    print(f"[Professor] Data path:        {state['raw_data_path']}")
-    print(f"[Professor] Budget:           ${state['cost_tracker']['budget_usd']:.2f}")
-    print(f"[Professor] Task type:        {state['task_type']}")
-    print(f"[Professor] Log:              {state['lineage_log_path']}")
+    print(f"[Professor] Session:     {state['session_id']}")
+    print(f"[Professor] Competition: {state['competition_name']}")
+    print(f"[Professor] Data:        {state['raw_data_path']}")
+    print(f"[Professor] Budget:      ${state['cost_tracker']['budget_usd']:.2f}")
     print()
 
-    # Graph will be wired starting Day 2
-    # For now: confirm state initialises correctly
-    print(f"[Professor] State initialised. Pipeline coming Day 2.")
+    result = run_professor(state)
+
+    print()
+    print(f"[Professor] COMPLETE")
+    print(f"[Professor] CV score:    {result.get('cv_mean', 'N/A')}")
+    print(f"[Professor] Submission:  {result.get('submission_path', 'N/A')}")
+    print(f"[Professor] LLM calls:   {result['cost_tracker']['llm_calls']}")
 
 
 def _status(session_id: str):

@@ -182,6 +182,17 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
 
     print(f"[DataEngineer] Complete. Attempts used: {result.get('attempts_used', 1)}")
 
+    # ── Log lineage ──────────────────────────────────────────────
+    from core.lineage import log_event
+    log_event(
+        session_id=session_id,
+        agent="data_engineer",
+        action="cleaned_and_profiled",
+        keys_read=["raw_data_path"],
+        keys_written=["clean_data_path", "schema_path", "data_hash"],
+        values_changed={"data_hash": data_hash},
+    )
+
     # ── Return updated state — ONLY pointers, never raw data ──────
     return {
         **state,

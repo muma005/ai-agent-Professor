@@ -2,6 +2,67 @@
 
 ---
 
+## Day 6 -- 2026-03-05
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (58/58 contract tests pass)
+
+**The ONE thing for today:**
+Replace submit stub with validated submission generator, add lineage logging.
+
+**Tasks completed:**
+- [x] tools/submit_tools.py -- generate_submission(), validate_existing_submission(), save_submission_log()
+- [x] core/lineage.py -- append-only JSONL logger, wired into all 3 agents
+- [x] core/professor.py -- replaced submit stub with real validated submission node
+- [x] LangSmith tracing placeholder in .env (user fills in API key)
+- [x] Full pipeline end-to-end with validated submission
+
+**CV score today:** 0.8798 (+/- 0.0055) -- 5-fold AUC, default LightGBM
+**Submission validation:** PASS -- 4277 rows, [PassengerId, Transported], dtype: bool, 0 nulls, IDs match
+
+**Lineage trace (3 events):**
+- data_engineer: cleaned_and_profiled -> clean_data_path, schema_path, data_hash
+- ml_optimizer: trained_and_scored -> model_registry, cv_mean, oof_predictions_path
+- submit: generated_submission -> submission_path
+
+**What broke:** Nothing! Clean day.
+
+**Tomorrow's ONE thing:**
+Day 7 Phase 1 Gate -- upload submission.csv to Kaggle and get a real LB score.
+
+**Final commit hash:** c694e49
+
+---
+
+## Day 5 -- 2026-03-05
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (45/45 contract tests pass)
+
+**The ONE thing for today:**
+First time `python main.py run` runs the full LangGraph graph end to end.
+
+**Tasks completed:**
+- [x] agents/semantic_router.py -- v0 linear routing, rule-based task type detection
+- [x] core/professor.py -- LangGraph StateGraph with conditional edges + submit stub
+- [x] Contract test: test_semantic_router_contract.py (13 tests, IMMUTABLE)
+- [x] main.py _run() wired to run_professor() -- first full pipeline run
+
+**CV score today:** 0.8798 (+/- 0.0055) -- 5-fold AUC, default LightGBM
+**Submission:** 4277 rows generated via submit stub
+
+**What broke:**
+- Windows cp1252 encoding crash on Unicode arrows (->)  in print statements
+
+**How it was fixed:**
+- Replaced Unicode arrows with ASCII `->` in semantic_router.py, professor.py, main.py
+
+**Final commit hash:** 9540a3a
+
+---
+
 ## Day 4 -- 2026-03-04
 
 **Schedule status:** ON TRACK

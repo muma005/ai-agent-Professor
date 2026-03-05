@@ -1,6 +1,15 @@
 # core/professor.py
 
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── LangSmith tracing — must be set before LangGraph is imported ──
+_tracing_enabled = os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
+if _tracing_enabled:
+    print(f"[Professor] LangSmith tracing ON -- project: "
+          f"{os.getenv('LANGCHAIN_PROJECT', 'default')}")
+
 import pickle
 import numpy as np
 import polars as pl
@@ -45,13 +54,13 @@ def _advance_dag(state: ProfessorState, current: str) -> str:
     dag = state.get("dag", [])
 
     if current not in dag:
-        print(f"[Professor] '{current}' not in DAG — ending.")
+        print(f"[Professor] '{current}' not in DAG -- ending.")
         return END
 
     idx = dag.index(current)
 
     if idx + 1 >= len(dag):
-        print(f"[Professor] '{current}' is last node — ending.")
+        print(f"[Professor] '{current}' is last node -- ending.")
         return END
 
     next_node = dag[idx + 1]
@@ -59,51 +68,57 @@ def _advance_dag(state: ProfessorState, current: str) -> str:
     return next_node
 
 
-# ── Submit node — Phase 1 stub ────────────────────────────────────
+# ── Submit node — validated submission via submit_tools ────────────
 
 def run_submit(state: ProfessorState) -> ProfessorState:
     """
-    Phase 1 stub: generate submission.csv from best model.
-    Full implementation Day 6 with tools/submit_tools.py.
+    Submit node: generates validated submission.csv using submit_tools.
+    Validates against sample_submission.csv for correct columns, row count,
+    ID match, and zero nulls.
     """
     from tools.data_tools import read_csv, read_parquet, read_json
+    from tools.submit_tools import generate_submission, save_submission_log
     from agents.ml_optimizer import _identify_target_column
-    from core.metric_contract import load_contract, PROBABILITY_METRICS
+    from core.metric_contract import load_contract
+    from core.lineage import log_event
 
-    session_id = state["session_id"]
-    output_dir = f"outputs/{session_id}"
+    session_id  = state["session_id"]
+    output_dir  = f"outputs/{session_id}"
+    competition = state["competition_name"]
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"[Submit] Generating submission — session: {session_id}")
+    print(f"[Submit] Generating submission -- session: {session_id}")
 
-    # Load test data
-    test_path = state["raw_data_path"].replace("train.csv", "test.csv")
+    # ── Load test data ────────────────────────────────────────────
+    test_path   = state["raw_data_path"].replace("train.csv", "test.csv")
+    sample_path = state["raw_data_path"].replace("train.csv", "sample_submission.csv")
+
     if not os.path.exists(test_path):
         print(f"[Submit] WARNING: test.csv not found at {test_path}")
-        print(f"[Submit] Stub: skipping submission generation.")
+        return {**state, "submission_path": None}
+    if not os.path.exists(sample_path):
+        print(f"[Submit] WARNING: sample_submission.csv not found at {sample_path}")
         return {**state, "submission_path": None}
 
     test_df = read_csv(test_path)
 
-    # Load best model
+    # ── Load model ────────────────────────────────────────────────
     if not state.get("model_registry"):
-        raise ValueError("[Submit] No model in registry — run ML Optimizer first")
+        raise ValueError("[Submit] No model in registry -- run ML Optimizer first")
 
     model_path = state["model_registry"][0]["model_path"]
     with open(model_path, "rb") as f:
         model = pickle.load(f)
 
-    # Identify target and feature columns from the training schema
+    # ── Prepare test features (same encoding as training) ────────
     schema     = read_json(state["schema_path"])
     train_df   = read_parquet(state["clean_data_path"])
     target_col = _identify_target_column(schema, state)
 
-    # Prepare test set — use same feature columns as training
-    test_features = [c for c in train_df.columns if c != target_col
-                     and c in test_df.columns]
-    test_subset = test_df.select(test_features)
+    feature_cols = [c for c in train_df.columns
+                    if c != target_col and c in test_df.columns]
+    test_subset = test_df.select(feature_cols)
 
-    # Encode string columns as integer codes (same as _prepare_features)
     for col in test_subset.columns:
         if test_subset[col].dtype in (pl.Utf8, pl.String):
             test_subset = test_subset.with_columns(
@@ -114,42 +129,55 @@ def run_submit(state: ProfessorState) -> ProfessorState:
                 pl.col(col).cast(pl.Int32)
             )
 
-    # Fill nulls
     for col in test_subset.select(cs.numeric()).columns:
         test_subset = test_subset.with_columns(
             pl.col(col).fill_null(0)
         )
-    for col in test_subset.select(cs.string()).columns:
-        test_subset = test_subset.with_columns(
-            pl.col(col).fill_null("missing")
-        )
 
     X_test = test_subset.to_numpy().astype(np.float64)
 
-    # Predict
+    # ── Generate predictions ──────────────────────────────────────
     contract_path = f"{output_dir}/metric_contract.json"
     if os.path.exists(contract_path):
         contract = load_contract(contract_path)
         if contract.requires_proba:
             preds = model.predict_proba(X_test)[:, 1]
-            preds = preds > 0.5  # convert to bool for classification
         else:
-            preds = model.predict(X_test)
+            preds = model.predict(X_test).astype(float)
     else:
-        preds = model.predict(X_test)
+        preds = model.predict(X_test).astype(float)
 
-    # Build submission
-    id_col = test_df.columns[0]  # first column is usually ID
-    submission = pl.DataFrame({
-        id_col:     test_df[id_col].to_list(),
-        target_col: preds.tolist(),
-    })
-
+    # ── Generate + validate submission via submit_tools ────────────
     submission_path = f"{output_dir}/submission.csv"
-    submission.write_csv(submission_path)
 
-    print(f"[Submit] submission.csv saved: {submission_path}")
-    print(f"[Submit] Rows: {len(submission)} | Columns: {submission.columns}")
+    result = generate_submission(
+        predictions=preds,
+        sample_submission_path=sample_path,
+        output_path=submission_path,
+        target_dtype="auto"
+    )
+
+    # ── Log to submission ladder ──────────────────────────────────
+    save_submission_log(
+        session_id=session_id,
+        submission_path=submission_path,
+        cv_mean=state.get("cv_mean", 0.0),
+        notes=f"Phase 1 baseline -- {competition}"
+    )
+
+    # ── Log lineage ──────────────────────────────────────────────
+    log_event(
+        session_id=session_id,
+        agent="submit",
+        action="generated_submission",
+        keys_read=["model_registry", "clean_data_path"],
+        keys_written=["submission_path"],
+        values_changed={"submission_path": submission_path},
+    )
+
+    print(f"[Submit] Done. Upload to Kaggle:")
+    print(f"  kaggle competitions submit -c {competition} "
+          f"-f {submission_path} -m 'Professor Phase 1 baseline'")
 
     return {
         **state,
@@ -164,7 +192,7 @@ def build_graph() -> StateGraph:
     Assemble the Professor LangGraph StateGraph.
 
     Phase 1 graph:
-      semantic_router → data_engineer → ml_optimizer → submit → END
+      semantic_router -> data_engineer -> ml_optimizer -> submit -> END
 
     Phase 2+: conditional edges, parallel branches, Critic loop added here.
     """
@@ -219,3 +247,4 @@ def run_professor(state: ProfessorState) -> ProfessorState:
     graph  = build_graph()
     result = graph.invoke(state)
     return result
+

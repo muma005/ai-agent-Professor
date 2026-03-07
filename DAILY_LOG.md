@@ -2,6 +2,45 @@
 
 ---
 
+## Day 7 -- 2026-03-07 -- PHASE 1 GATE
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (58/58 contract tests pass)
+
+### === PHASE 1 GATE: PASSED ===
+
+**Gate session:** spaceshi_694d438e
+**Gate CV AUC:** 0.8798 (+/- 0.0055)
+**Submission 0 CV:** 0.775
+**Wall clock:** 20 seconds
+**Kaggle submit:** pending upload
+
+**Gate conditions (all 5 PASS):**
+- PASS  CV 0.8798 >= floor 0.7700 (Sub0: 0.775 - 0.005)
+- PASS  submission.csv valid: 4277 rows, correct columns, zero nulls
+- PASS  All contract tests green (58/58, pytest exit code 0)
+- PASS  Wall clock: 0m 20s < 30m limit
+- PASS  CV 0.8798 > 0.70 absolute floor
+
+**Tasks completed:**
+- [x] Task 1: core/state.py -- Annotated list fields (REPLACE vs ACCUMULATE reducers)
+- [x] Task 2: tests/phase1_gate.py -- standalone gate script with 5 pass conditions
+- [x] Task 3: tools/mlflow_tracker.py -- graceful fallback, wired into ml_optimizer
+- [x] Task 4: Full gate run -- PASSED
+- [x] Task 5: tests/regression/test_phase1_regression.py -- FROZEN, IMMUTABLE
+
+**Bugs found and fixed:**
+- NoneType + NoneType crash: ACCUMULATE fields (model_registry, submission_log) must init as [] not None
+- model_registry duplication: ml_optimizer must return only new entry (not full list copy) with operator.add reducer
+
+**Regression test frozen with:**
+- Gate CV: 0.8798
+- CV floor: 0.8498 (gate - 0.03)
+- Commit hash: b60b6150276f84d8fded513cdae17793c1fed431
+
+---
+
 ## Day 6 -- 2026-03-05
 
 **Schedule status:** ON TRACK

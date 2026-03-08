@@ -187,7 +187,7 @@ def save_submission_log(
     cv_mean: float,
     lb_score: float = None,
     notes: str = ""
-) -> str:
+) -> dict:
     """
     Append an entry to the session's submission ladder log.
     Used to track every submission and its CV/LB score.
@@ -208,6 +208,8 @@ def save_submission_log(
 
     with open(log_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+    return entry
 
     print(f"[SubmitTools] Logged submission: CV={cv_mean:.4f} "
           f"LB={lb_score if lb_score else 'pending'}")

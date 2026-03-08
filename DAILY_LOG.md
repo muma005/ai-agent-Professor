@@ -14,7 +14,7 @@
 **Gate CV AUC:** 0.8798 (+/- 0.0055)
 **Submission 0 CV:** 0.775
 **Wall clock:** 20 seconds
-**Kaggle submit:** pending upload
+**Kaggle submit:** 0.78419 LB score (fixed bool format)
 
 **Gate conditions (all 5 PASS):**
 - PASS  CV 0.8798 >= floor 0.7700 (Sub0: 0.775 - 0.005)

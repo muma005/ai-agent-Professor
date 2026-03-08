@@ -216,9 +216,11 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
 
-    # ── Update model registry in state ───────────────────────────
-    model_registry = list(state.get("model_registry") or [])
-    model_registry.append({
+    # ── Build new model registry entry ─────────────────────────────
+    # NOTE: With Annotated[list, operator.add] in ProfessorState,
+    # LangGraph concatenates the returned list with existing state.
+    # So we return ONLY the new entry, not a copy of the full list.
+    new_registry_entry = [{
         "model_path":  model_path,
         "model_type":  "lightgbm_v0",
         "cv_mean":     cv_mean,
@@ -226,7 +228,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "scorer_name": contract.scorer_name,
         "data_hash":   state.get("data_hash"),
         "fold_scores": fold_scores,
-    })
+    }]
 
     # ── Update cost tracker ───────────────────────────────────────
     cost_tracker = dict(state["cost_tracker"])
@@ -245,11 +247,24 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         values_changed={"cv_mean": cv_mean, "cv_std": cv_std},
     )
 
+    # ── Log to MLflow (graceful fallback) ─────────────────────────
+    from tools.mlflow_tracker import log_run as mlflow_log_run
+    mlflow_log_run(
+        session_id=session_id,
+        competition=state["competition_name"],
+        model_type="lightgbm_v0",
+        params={"n_estimators": 500, "learning_rate": 0.05, "num_leaves": 31},
+        cv_mean=cv_mean,
+        cv_std=cv_std,
+        n_features=len(feature_names),
+        data_hash=state.get("data_hash", "unknown"),
+    )
+
     return {
         **state,
         "cv_scores":            fold_scores,
         "cv_mean":              cv_mean,
-        "model_registry":       model_registry,
+        "model_registry":       new_registry_entry,
         "metric_contract":      metrics,
         "oof_predictions_path": oof_path,
         "cost_tracker":         cost_tracker,

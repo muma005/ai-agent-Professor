@@ -69,11 +69,14 @@ def generate_submission(
             target_dtype = "int"
 
     # ── Cast predictions to correct type ─────────────────────────
+    # IMPORTANT: For bool dtype, Polars writes Python booleans as
+    # lowercase "true"/"false" in CSV. Kaggle expects capitalized
+    # "True"/"False". We use string casting to match Kaggle exactly.
     if target_dtype == "bool":
         if predictions.dtype in (np.float64, np.float32):
-            preds_cast = (predictions > 0.5).tolist()
+            preds_cast = ["True" if p > 0.5 else "False" for p in predictions]
         else:
-            preds_cast = [bool(p) for p in predictions]
+            preds_cast = ["True" if bool(p) else "False" for p in predictions]
     elif target_dtype == "float":
         preds_cast = [float(p) for p in predictions]
     else:

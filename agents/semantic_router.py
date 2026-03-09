@@ -9,6 +9,7 @@ from core.state import ProfessorState
 
 LINEAR_ROUTE_V0 = [
     "data_engineer",
+    "eda_agent",
     "validation_architect",
     "ml_optimizer",
     "submit",

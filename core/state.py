@@ -55,9 +55,10 @@ class ProfessorState(TypedDict):
 
     # ── Data (pointers only -- never raw DataFrames in state) ─────
     raw_data_path: str
-    clean_data_path: Optional[str]
+    clean_data_path: str
+    eda_report_path: str
+    eda_report: dict
     schema_path: Optional[str]
-    eda_report_path: Optional[str]
     data_hash: str     # SHA-256 of source file, first 16 chars
 
     # ── Feature Engineering ───────────────────────────────────────
@@ -135,9 +136,10 @@ def initial_state(
             "last_updated":          None,
         },
         raw_data_path=data_path,
-        clean_data_path=None,
+        clean_data_path="",
+        eda_report_path="",
+        eda_report={},
         schema_path=None,
-        eda_report_path=None,
         data_hash="",
         feature_manifest=None,
         feature_factory_checkpoint=None,

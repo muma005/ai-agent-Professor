@@ -18,6 +18,7 @@ from langgraph.graph import StateGraph, END
 from core.state import ProfessorState
 from agents.semantic_router import run_semantic_router
 from agents.data_engineer import run_data_engineer
+from agents.eda_agent import run_eda_agent
 from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 
@@ -38,8 +39,13 @@ def route_after_router(state: ProfessorState) -> str:
 
 
 def route_after_data_engineer(state: ProfessorState) -> str:
-    """After Data Engineer: advance to next node in DAG."""
+    """After Data Engineer: advance to EDA Agent."""
     return _advance_dag(state, current="data_engineer")
+
+
+def route_after_eda(state: ProfessorState) -> str:
+    """After EDA Agent: advance to Validation Architect."""
+    return _advance_dag(state, current="eda_agent")
 
 
 def route_after_validation(state: ProfessorState) -> str:
@@ -214,6 +220,7 @@ def build_graph() -> StateGraph:
     # ── Add nodes ─────────────────────────────────────────────────
     graph.add_node("semantic_router", run_semantic_router)
     graph.add_node("data_engineer",   run_data_engineer)
+    graph.add_node("eda_agent",       run_eda_agent)
     graph.add_node("validation_architect", run_validation_architect)
     graph.add_node("ml_optimizer",    run_ml_optimizer)
     graph.add_node("submit",          run_submit)
@@ -234,6 +241,15 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "data_engineer",
         route_after_data_engineer,
+        {
+            "eda_agent": "eda_agent",
+            END:             END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "eda_agent",
+        route_after_eda,
         {
             "validation_architect": "validation_architect",
             END:             END,

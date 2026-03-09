@@ -2,13 +2,13 @@
 
 import os
 import sys
-import signal
+import subprocess
+import tempfile
 import traceback
+import logging
 from typing import Optional
-from RestrictedPython import compile_restricted, safe_globals, safe_builtins
-from dotenv import load_dotenv
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 # ── Polars preamble injected before every generated script ─────────
 SANDBOX_PREAMBLE = """\
@@ -17,11 +17,11 @@ import polars.selectors as cs
 import numpy as np
 import json
 import os
-# ── Library standard: Polars not Pandas ───────────────────────────
+# -- Library standard: Polars not Pandas --
 # CORRECT:   pl.read_csv()  df.write_parquet()  df.fill_null()
 # INCORRECT: pd.read_csv()  df.to_parquet()     df.fillna()
 # If pandas required: convert with pl.from_pandas(df) before returning
-# ──────────────────────────────────────────────────────────────────
+# -----------------------------------------
 """
 
 # ── Allowed imports inside sandbox ────────────────────────────────
@@ -32,6 +32,16 @@ ALLOWED_MODULES = {
     "collections", "functools", "datetime", "pathlib"
 }
 
+# ── Blocked modules — never allow these from generated code ───────
+BLOCKED_MODULES = {
+    "subprocess", "shutil", "socket", "http", "urllib",
+    "ftplib", "smtplib", "ctypes", "multiprocessing",
+    "signal", "pty", "resource", "sys",
+}
+
+SANDBOX_TIMEOUT_S = 600  # 10 minutes
+
+
 class SandboxExecutionError(Exception):
     """Raised when code fails all retry attempts."""
     pass
@@ -41,177 +51,131 @@ class SandboxTimeoutError(Exception):
     pass
 
 
-def _timeout_handler(signum, frame):
-    raise SandboxTimeoutError("Code execution exceeded 10 minute limit")
-
-
-def _safe_import(name, *args, **kwargs):
-    """Controlled import — only allows modules in ALLOWED_MODULES."""
-    # Check top-level module name (e.g. "sklearn" from "sklearn.ensemble")
-    top_level = name.split(".")[0]
-    if top_level not in ALLOWED_MODULES:
-        raise ImportError(
-            f"Import of '{name}' is not allowed in sandbox. "
-            f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}"
-        )
-    return __builtins__["__import__"](name, *args, **kwargs) if isinstance(__builtins__, dict) \
-        else __import__(name, *args, **kwargs)
-
-
-def _make_safe_globals(session_id: str) -> dict:
-    """Build a restricted global namespace for the sandbox."""
-    import polars as pl
-    import polars.selectors as cs
-    import numpy as np
-    import json
-    import math
-
-    glb = dict(safe_globals)
-    glb["__builtins__"] = dict(safe_builtins)
-
-    # Controlled import — only ALLOWED_MODULES
-    glb["__builtins__"]["__import__"] = _safe_import
-
-    # ── RestrictedPython guard functions ───────────────────────────
-    # RestrictedPython transforms print() -> _print_(), x.attr -> _getattr_(x, 'attr'), etc.
-    # We must provide these guard functions for the transformed code to run.
-    from RestrictedPython import PrintCollector
-
-    glb["_print_"] = PrintCollector
-    glb["_getattr_"] = getattr
-    glb["_getitem_"] = lambda obj, key: obj[key]
-    glb["_getiter_"] = iter
-    glb["_write_"] = lambda x: x  # allow attribute assignment on objects
-    glb["_inplacevar_"] = lambda op, x, y: op(x, y)  # +=, -=, etc.
-    glb["pl"] = pl
-    glb["cs"] = cs
-    glb["np"] = np
-    glb["json"] = json
-    glb["math"] = math
-    glb["os"] = os
-    glb["polars"] = pl
-    glb["numpy"] = np
-
-    # Allow print for debugging output
-    glb["__builtins__"]["print"] = print
-    glb["__builtins__"]["len"] = len
-    glb["__builtins__"]["range"] = range
-    glb["__builtins__"]["enumerate"] = enumerate
-    glb["__builtins__"]["zip"] = zip
-    glb["__builtins__"]["sorted"] = sorted
-    glb["__builtins__"]["min"] = min
-    glb["__builtins__"]["max"] = max
-    glb["__builtins__"]["sum"] = sum
-    glb["__builtins__"]["abs"] = abs
-    glb["__builtins__"]["round"] = round
-    glb["__builtins__"]["map"] = map
-    glb["__builtins__"]["filter"] = filter
-    glb["__builtins__"]["any"] = any
-    glb["__builtins__"]["all"] = all
-    glb["__builtins__"]["list"] = list
-    glb["__builtins__"]["dict"] = dict
-    glb["__builtins__"]["tuple"] = tuple
-    glb["__builtins__"]["set"] = set
-    glb["__builtins__"]["str"] = str
-    glb["__builtins__"]["int"] = int
-    glb["__builtins__"]["float"] = float
-    glb["__builtins__"]["bool"] = bool
-    glb["__builtins__"]["type"] = type
-    glb["__builtins__"]["isinstance"] = isinstance
-    glb["__builtins__"]["issubclass"] = issubclass
-    glb["__builtins__"]["hasattr"] = hasattr
-    glb["__builtins__"]["getattr"] = getattr
-    glb["__builtins__"]["setattr"] = setattr
-    glb["__builtins__"]["open"] = open  # needed for file I/O
-    glb["__builtins__"]["Exception"] = Exception
-    glb["__builtins__"]["ValueError"] = ValueError
-    glb["__builtins__"]["TypeError"] = TypeError
-    glb["__builtins__"]["KeyError"] = KeyError
-    glb["__builtins__"]["IndexError"] = IndexError
-    glb["__builtins__"]["RuntimeError"] = RuntimeError
-    glb["__builtins__"]["StopIteration"] = StopIteration
-    glb["__builtins__"]["NotImplementedError"] = NotImplementedError
-
-    # Session output path — sandbox writes here
-    glb["SESSION_OUTPUT_DIR"] = f"outputs/{session_id}"
-    os.makedirs(f"outputs/{session_id}", exist_ok=True)
-
-    return glb
-
-
-def _execute_once(code: str, session_id: str, timeout_seconds: int = 600) -> dict:
+def _validate_imports(code: str) -> Optional[str]:
     """
-    Single execution attempt — no retry logic here.
-    Returns: {success, stdout, stderr, result}
+    Static check: scans code for blocked import statements.
+    Returns error message if blocked import found, else None.
+    """
+    for line in code.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            # Extract module name
+            if stripped.startswith("from "):
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    module = parts[1].split(".")[0]
+            else:
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    module = parts[1].split(".")[0].split(",")[0]
+                else:
+                    continue
+            if module in BLOCKED_MODULES:
+                return (
+                    f"Import of '{module}' is not allowed in sandbox. "
+                    f"Blocked modules: {', '.join(sorted(BLOCKED_MODULES))}"
+                )
+    return None
+
+
+def _execute_once(code: str, session_id: str, timeout_seconds: int = 600,
+                  extra_files: dict = None) -> dict:
+    """
+    Single execution attempt via subprocess.
+    Returns: {success, stdout, stderr, result, timed_out, returncode}
     """
     full_code = SANDBOX_PREAMBLE + code
 
-    # Capture stdout
-    import io
-    from contextlib import redirect_stdout, redirect_stderr
+    # Validate imports before running
+    import_error = _validate_imports(code)
+    if import_error:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": import_error,
+            "error": "ImportError",
+            "traceback": import_error,
+            "timed_out": False,
+            "returncode": 1,
+        }
 
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
+    # Ensure output directory exists
+    output_dir = f"outputs/{session_id}"
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Set timeout (Unix only — Windows uses threading approach)
-    if sys.platform != "win32":
-        signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(timeout_seconds)
+    # Inject the session output dir as a variable
+    header = f'SESSION_OUTPUT_DIR = "{output_dir.replace(chr(92), "/")}"\n'
+    full_code = header + full_code
 
+    # Write script to a temp file and execute via subprocess
     try:
-        compiled = compile_restricted(full_code, "<sandbox>", "exec")
-        glb = _make_safe_globals(session_id)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", prefix="professor_sandbox_",
+            delete=False, dir=output_dir, encoding="utf-8"
+        ) as f:
+            f.write(full_code)
+            script_path = f.name
 
-        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-            exec(compiled, glb)
+        # Write extra files into the output dir (cwd for subprocess)
+        if extra_files:
+            for fname, content in extra_files.items():
+                fpath = os.path.join(os.getcwd(), fname)
+                with open(fpath, "w", encoding="utf-8") as ef:
+                    ef.write(content)
 
-        if sys.platform != "win32":
-            signal.alarm(0)  # cancel timeout
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            cwd=os.getcwd(),
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
 
-        # Extract PrintCollector output (RestrictedPython transforms
-        # print() -> _print_(), which stores output in 'printed' variable)
-        printed_output = ""
-        if "_print" in glb:
-            collector = glb["_print"]
-            if hasattr(collector, "__call__"):
-                # PrintCollector instance — call it to get the output
-                try:
-                    printed_output = str(collector())
-                except Exception:
-                    pass
-        elif "printed" in glb:
-            printed_output = str(glb["printed"])
-
-        # Combine redirect_stdout capture with PrintCollector output
-        combined_stdout = stdout_capture.getvalue()
-        if printed_output:
-            combined_stdout = printed_output + combined_stdout
+        # Clean up temp script
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
 
         return {
-            "success": True,
-            "stdout": combined_stdout,
-            "stderr": stderr_capture.getvalue(),
-            "result": glb.get("result"),  # scripts can set result = value
-            "globals": glb
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "result": None,
+            "globals": {},
+            "timed_out": False,
+            "returncode": result.returncode,
         }
 
-    except SandboxTimeoutError:
+    except subprocess.TimeoutExpired as e:
+        try:
+            os.unlink(script_path)
+        except (OSError, NameError):
+            pass
         return {
             "success": False,
-            "stdout": stdout_capture.getvalue(),
-            "stderr": "TIMEOUT: Code exceeded 10 minute execution limit",
+            "stdout": e.stdout or "",
+            "stderr": f"TIMEOUT: Code exceeded {timeout_seconds}s execution limit",
             "error": "SandboxTimeoutError",
-            "traceback": "Execution timeout"
+            "traceback": "Execution timeout",
+            "timed_out": True,
+            "returncode": -1,
         }
+
     except Exception as e:
-        if sys.platform != "win32":
-            signal.alarm(0)
+        try:
+            os.unlink(script_path)
+        except (OSError, NameError):
+            pass
         return {
             "success": False,
-            "stdout": stdout_capture.getvalue(),
-            "stderr": stderr_capture.getvalue(),
+            "stdout": "",
+            "stderr": str(e),
             "error": type(e).__name__,
-            "traceback": traceback.format_exc()
+            "traceback": traceback.format_exc(),
+            "timed_out": False,
+            "returncode": 1,
         }
 
 
@@ -223,7 +187,7 @@ def execute_code(
     timeout_seconds: int = 600
 ) -> dict:
     """
-    Execute code in RestrictedPython sandbox with 3-attempt retry loop.
+    Execute code in subprocess sandbox with retry loop.
 
     On failure: feeds full traceback back to LLM (via llm_fix_callback)
     which returns corrected code. Retries up to max_attempts times.
@@ -261,7 +225,7 @@ def execute_code(
 EXECUTION FAILED (Attempt {attempt}/{max_attempts})
 Error type:  {result.get('error', 'Unknown')}
 Traceback:
-{result.get('traceback', 'No traceback available')}
+{result.get('traceback', result.get('stderr', 'No traceback available'))}
 Stdout before failure:
 {result.get('stdout', '')}
 """
@@ -273,8 +237,8 @@ Stdout before failure:
             try:
                 current_code = llm_fix_callback(
                     code=current_code,
-                    error=result.get("error", ""),
-                    traceback_str=result.get("traceback", "")
+                    error=result.get("error", result.get("stderr", "")),
+                    traceback_str=result.get("traceback", result.get("stderr", ""))
                 )
             except Exception as callback_error:
                 print(f"[sandbox] LLM fix callback failed: {callback_error}")
@@ -286,6 +250,18 @@ Stdout before failure:
     # ── All attempts exhausted ─────────────────────────────────────
     raise SandboxExecutionError(
         f"Code failed after {max_attempts} attempts.\n"
-        f"Final error: {last_result.get('error')}\n"
-        f"Final traceback:\n{last_result.get('traceback')}"
+        f"Final error: {last_result.get('error', last_result.get('stderr', ''))}\n"
+        f"Final traceback:\n{last_result.get('traceback', last_result.get('stderr', ''))}"
     )
+
+
+def run_in_sandbox(code: str, timeout: int = SANDBOX_TIMEOUT_S,
+                   extra_files: dict = None, **kwargs) -> dict:
+    """Standalone sandbox execution -- used by service_health.py fallback."""
+    return _execute_once(code, session_id="standalone", timeout_seconds=timeout,
+                         extra_files=extra_files)
+
+
+def run_in_subprocess_sandbox(code: str, timeout: int = SANDBOX_TIMEOUT_S, **kwargs) -> dict:
+    """Alias for run_in_sandbox — used as fallback target in service_health.py."""
+    return run_in_sandbox(code, timeout=timeout, **kwargs)

@@ -1,0 +1,89 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.2, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\ADMIN\Desktop\Professor\ai-agent-Professor\venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\ADMIN\Desktop\Professor\ai-agent-Professor
+plugins: anyio-4.12.1, langsmith-0.7.9
+collecting ... collected 54 items
+
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_failure_count_1_is_micro_not_macro PASSED [  1%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_failure_count_2_is_macro_not_hitl PASSED [  3%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_failure_count_3_is_hitl_not_macro PASSED [  5%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_triage_fires_at_5pct_budget_not_10pct PASSED [  7%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_triage_overrides_failure_count_1 PASSED [  9%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_triage_fires_at_2_hours_remaining_not_3 PASSED [ 11%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_micro_error_context_contains_full_traceback PASSED [ 12%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_micro_failure_count_increments_by_exactly_1 PASSED [ 14%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_macro_dag_version_increments_from_current_value PASSED [ 16%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_macro_does_not_halt_pipeline PASSED [ 18%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_hitl_reason_contains_session_id_and_resume_command PASSED [ 20%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_hitl_does_not_raise_when_redis_is_down PASSED [ 22%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_reset_failure_count_clears_error_context PASSED [ 24%]
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_handle_escalation_never_raises_for_any_level PASSED [ 25%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_numpy_executes_without_error PASSED [ 27%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_polars_executes_without_error PASSED [ 29%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_lightgbm_trains_without_error PASSED [ 31%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_sklearn_pipeline_executes PASSED [ 33%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_timeout_enforced_within_tolerance PASSED [ 35%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_returncode_nonzero_on_script_crash PASSED [ 37%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_stdout_captured_correctly PASSED [ 38%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_extra_files_available_in_sandbox PASSED [ 40%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_memory_limit_kills_oom_process PASSED [ 42%]
+tests/test_day9_quality.py::TestSubprocessSandboxRealExecution::test_existing_sandbox_contract_tests_still_pass PASSED [ 44%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_groq_fallback_activates_on_connection_error PASSED [ 46%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_groq_fallback_logs_warning_not_silence PASSED [ 48%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_retry_delay_is_exponential_not_linear PASSED [ 50%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_service_unavailable_raised_when_no_fallback_and_all_retries_fail PASSED [ 51%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_kaggle_api_retry_uses_60s_base_delay PASSED [ 53%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_chromadb_fallback_returns_empty_list_not_none PASSED [ 55%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_redis_fallback_stores_and_retrieves_within_session PASSED [ 57%]
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_successful_call_does_not_retry PASSED [ 59%]
+tests/test_day9_quality.py::TestDockerRedisPersistenceGuarantees::test_real_redis_connected_not_fakeredis SKIPPED [ 61%]
+tests/test_day9_quality.py::TestDockerRedisPersistenceGuarantees::test_state_round_trip_preserves_floats PASSED [ 62%]
+tests/test_day9_quality.py::TestDockerRedisPersistenceGuarantees::test_state_round_trip_preserves_nested_dicts PASSED [ 64%]
+tests/test_day9_quality.py::TestDockerRedisPersistenceGuarantees::test_non_serialisable_values_excluded_not_crashed PASSED [ 66%]
+tests/test_day9_quality.py::TestDockerRedisPersistenceGuarantees::test_ttl_is_set_on_saved_state PASSED [ 68%]
+tests/test_day9_quality.py::TestDockerRedisPersistenceGuarantees::test_load_state_returns_none_for_missing_key PASSED [ 70%]
+tests/test_day9_quality.py::TestDockerRedisPersistenceGuarantees::test_hitl_checkpoint_survives_client_reconnection SKIPPED [ 72%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_parallel_groups_field_in_initial_state PASSED [ 74%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_intelligence_group_has_correct_members PASSED [ 75%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_fan_join_raises_when_schema_missing PASSED [ 77%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_fan_join_raises_when_competition_brief_missing PASSED [ 79%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_fan_join_succeeds_when_both_branches_complete PASSED [ 81%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_model_trial_fan_out_creates_three_sends PASSED [ 83%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_critic_fan_out_creates_four_sends PASSED [ 85%]
+tests/test_day9_quality.py::TestParallelDAGFanOutFanJoin::test_parallel_execution_faster_than_serial PASSED [ 87%]
+tests/test_day9_quality.py::TestInnerRetryLoopSelfCorrection::test_retry_loop_present_in_data_engineer PASSED [ 88%]
+tests/test_day9_quality.py::TestInnerRetryLoopSelfCorrection::test_retry_loop_present_in_all_required_agents PASSED [ 90%]
+tests/test_day9_quality.py::TestInnerRetryLoopSelfCorrection::test_error_context_grows_on_each_retry PASSED [ 92%]
+tests/test_day9_quality.py::TestInnerRetryLoopSelfCorrection::test_previous_traceback_injected_into_second_attempt_prompt PASSED [ 94%]
+tests/test_day9_quality.py::TestInnerRetryLoopSelfCorrection::test_success_on_second_attempt_resets_failure_count PASSED [ 96%]
+tests/test_day9_quality.py::TestInnerRetryLoopSelfCorrection::test_escalation_happens_only_after_max_attempts PASSED [ 98%]
+tests/test_day9_quality.py::TestInnerRetryLoopSelfCorrection::test_keyboard_interrupt_not_swallowed PASSED [100%]
+
+============================== warnings summary ===============================
+tests/test_day9_quality.py: 27 warnings
+  C:\Users\ADMIN\Desktop\Professor\ai-agent-Professor\core\state.py:142: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    created_at=datetime.utcnow().isoformat(),
+
+tests/test_day9_quality.py: 11 warnings
+  C:\Users\ADMIN\Desktop\Professor\ai-agent-Professor\core\lineage.py:31: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "timestamp":      datetime.utcnow().isoformat(),
+
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_hitl_reason_contains_session_id_and_resume_command
+tests/test_day9_quality.py::TestCircuitBreakerEscalationPrecision::test_handle_escalation_never_raises_for_any_level
+  C:\Users\ADMIN\Desktop\Professor\ai-agent-Professor\guards\circuit_breaker.py:164: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "checkpointed_at": __import__("datetime").datetime.utcnow().isoformat(),
+
+tests/test_day9_quality.py::TestServiceHealthFallbackQuality::test_groq_fallback_activates_on_connection_error
+  C:\Users\ADMIN\Desktop\Professor\ai-agent-Professor\tools\llm_client.py:6: FutureWarning: 
+  
+  All support for the `google.generativeai` package has ended. It will no longer be receiving 
+  updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+  See README for more details:
+  
+  https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+  
+    import google.generativeai as genai
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========== 52 passed, 2 skipped, 41 warnings in 143.69s (0:02:23) ============

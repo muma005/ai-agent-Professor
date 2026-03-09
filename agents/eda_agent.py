@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 from core.state import ProfessorState
 from tools.data_tools import read_parquet, read_json
 from core.lineage import log_event
+from guards.agent_retry import with_agent_retry
 
 
 def _analyze_target(df: pl.DataFrame, target_col: str) -> dict:
@@ -209,6 +210,7 @@ def _analyze_temporal(df: pl.DataFrame) -> dict:
     }
 
 
+@with_agent_retry("EDAAgent")
 def run_eda_agent(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: EDA Agent.

@@ -14,6 +14,7 @@ from core.metric_contract import (
     save_contract, load_contract, contract_to_prompt_snippet
 )
 from tools.data_tools import read_parquet, read_json
+from guards.agent_retry import with_agent_retry
 
 
 def _identify_target_column(schema: dict, state: ProfessorState) -> str:
@@ -68,6 +69,7 @@ def _prepare_features(df: pl.DataFrame, target_col: str, schema: dict) -> tuple:
     return X, y, feature_cols
 
 
+@with_agent_retry("MLOptimizer")
 def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: ML Optimizer v0.

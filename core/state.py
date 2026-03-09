@@ -105,6 +105,20 @@ class ProfessorState(TypedDict):
     error_count: int
     escalation_level: str        # "micro" | "macro" | "hitl" | "triage"
 
+    # -- Circuit Breaker (Day 9) -----------------------------------
+    current_node_failure_count: int
+    error_context: list           # [{agent, attempt, error, traceback}]
+    dag_version: int
+    macro_replan_requested: bool
+    macro_replan_reason: str
+    pipeline_halted: bool
+    triage_mode: bool
+    budget_remaining_usd: float
+    budget_limit_usd: float
+
+    # -- Parallel Execution (Day 9) --------------------------------
+    parallel_groups: dict   # {group_name: {status, members}}
+
     # ── Budget ────────────────────────────────────────────────────
     cost_tracker: CostTracker
 
@@ -178,5 +192,21 @@ def initial_state(
             triage_threshold=0.95
         ),
         report_path=None,
-        lineage_log_path=f"outputs/logs/{session_id}.jsonl"
+        lineage_log_path=f"outputs/logs/{session_id}.jsonl",
+        # -- Circuit Breaker (Day 9) --
+        current_node_failure_count=0,
+        error_context=[],
+        dag_version=1,
+        macro_replan_requested=False,
+        macro_replan_reason="",
+        pipeline_halted=False,
+        triage_mode=False,
+        budget_remaining_usd=budget_usd,
+        budget_limit_usd=budget_usd,
+        # -- Parallel Execution (Day 9) --
+        parallel_groups={
+            "intelligence": {"status": "pending", "members": ["competition_intel", "data_engineer"]},
+            "model_trials": {"status": "pending", "members": ["lgbm", "xgb", "catboost"]},
+            "critic":       {"status": "pending", "members": ["vector_1", "vector_2", "vector_3", "vector_4"]},
+        },
     )

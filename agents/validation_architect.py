@@ -8,6 +8,7 @@ from core.state import ProfessorState
 from core.metric_contract import build_metric_contract, save_contract
 from tools.data_tools import read_json
 from core.lineage import log_event
+from guards.agent_retry import with_agent_retry
 
 
 _CV_STRATEGY_RULES = {
@@ -105,6 +106,7 @@ def _detect_cv_mismatch_risk(
     return None
 
 
+@with_agent_retry("ValidationArchitect")
 def run_validation_architect(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: Validation Architect.

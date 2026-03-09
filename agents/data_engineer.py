@@ -7,6 +7,7 @@ from core.state import ProfessorState
 from tools.e2b_sandbox import execute_code, SandboxExecutionError
 from tools.llm_client import call_llm
 from tools.data_tools import hash_dataset, ensure_session_dirs
+from guards.agent_retry import with_agent_retry
 
 
 # ── LLM fix callback for sandbox retry loop ───────────────────────
@@ -99,6 +100,7 @@ print("DATA_ENGINEER_COMPLETE")
 
 
 # ── Main agent function (LangGraph node) ─────────────────────────
+@with_agent_retry("DataEngineer")
 def run_data_engineer(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: Data Engineer.

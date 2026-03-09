@@ -8,6 +8,7 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 from core.state import ProfessorState
 from tools.llm_client import call_llm
 from core.lineage import log_event
+from guards.agent_retry import with_agent_retry
 
 def _fetch_notebooks(competition: str) -> list:
     """Fetch top public notebooks via Kaggle API."""
@@ -121,6 +122,7 @@ def _synthesize_brief(notebooks: list, competition: str) -> dict:
     }
 
 
+@with_agent_retry("CompetitionIntel")
 def run_competition_intel(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: Competition Intel (GM-CAP 1)

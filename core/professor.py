@@ -28,6 +28,9 @@ from agents.ml_optimizer import run_ml_optimizer
 
 def route_after_router(state: ProfessorState) -> str:
     """After router runs: go to first node in DAG."""
+    if state.get("pipeline_halted") or state.get("triage_mode"):
+        print("[Professor] Pipeline halted (circuit breaker). Ending.")
+        return END
     dag = state.get("dag", [])
     if not dag:
         print("[Professor] WARNING: DAG is empty after router. Ending.")
@@ -70,7 +73,12 @@ def _advance_dag(state: ProfessorState, current: str) -> str:
     """
     Find current node in DAG and return the next one.
     If current is last node, return END.
+    Checks pipeline_halted / triage_mode before advancing.
     """
+    if state.get("pipeline_halted") or state.get("triage_mode"):
+        print(f"[Professor] Pipeline halted after '{current}'. Ending.")
+        return END
+
     dag = state.get("dag", [])
 
     if current not in dag:

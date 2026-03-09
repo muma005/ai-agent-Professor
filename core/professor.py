@@ -18,6 +18,7 @@ from langgraph.graph import StateGraph, END
 from core.state import ProfessorState
 from agents.semantic_router import run_semantic_router
 from agents.data_engineer import run_data_engineer
+from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 
 
@@ -39,6 +40,14 @@ def route_after_router(state: ProfessorState) -> str:
 def route_after_data_engineer(state: ProfessorState) -> str:
     """After Data Engineer: advance to next node in DAG."""
     return _advance_dag(state, current="data_engineer")
+
+
+def route_after_validation(state: ProfessorState) -> str:
+    """After Validation Architect: halt if HITL required, else advance."""
+    if state.get("hitl_required"):
+        print("[Professor] HITL required. Halting execution.")
+        return END
+    return _advance_dag(state, current="validation_architect")
 
 
 def route_after_optimizer(state: ProfessorState) -> str:
@@ -205,6 +214,7 @@ def build_graph() -> StateGraph:
     # ── Add nodes ─────────────────────────────────────────────────
     graph.add_node("semantic_router", run_semantic_router)
     graph.add_node("data_engineer",   run_data_engineer)
+    graph.add_node("validation_architect", run_validation_architect)
     graph.add_node("ml_optimizer",    run_ml_optimizer)
     graph.add_node("submit",          run_submit)
 
@@ -224,6 +234,15 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "data_engineer",
         route_after_data_engineer,
+        {
+            "validation_architect": "validation_architect",
+            END:             END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "validation_architect",
+        route_after_validation,
         {
             "ml_optimizer": "ml_optimizer",
             END:             END,

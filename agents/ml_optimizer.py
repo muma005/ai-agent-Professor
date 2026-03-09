@@ -120,7 +120,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     n_folds   = 5
     task_type = contract.task_type
 
-    if task_type == "classification":
+    if "classification" in task_type:
         cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
     else:
         cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
@@ -136,7 +136,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         y_train, y_val = y[train_idx], y[val_idx]
 
         # Build model — Phase 1: default params
-        if task_type == "classification":
+        if "classification" in task_type:
             model = LGBMClassifier(
                 n_estimators=500,
                 learning_rate=0.05,

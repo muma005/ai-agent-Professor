@@ -88,6 +88,10 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
 
     print(f"[MLOptimizer] Starting — session: {session_id}")
 
+    if state.get("hitl_required"):
+        print("[MLOptimizer] HALTED: hitl_required flag is set.")
+        return {**state, "ml_optimizer_ran": False}
+
     # ── Load data ─────────────────────────────────────────────────
     if not state.get("clean_data_path"):
         raise ValueError("[MLOptimizer] clean_data_path not in state — run Data Engineer first")

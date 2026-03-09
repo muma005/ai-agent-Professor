@@ -175,7 +175,7 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
     # ── CV/LB mismatch detection ───────────────────────────────────────────────
     mismatch_reason = _detect_cv_mismatch_risk(cv_type, datetime_col, group_col, brief)
     if mismatch_reason:
-        print(f"[ValidationArchitect] ⚠️  CV/LB MISMATCH RISK: {mismatch_reason}")
+        print(f"[ValidationArchitect] CV/LB MISMATCH RISK: {mismatch_reason}")
         validation_strategy = {
             "cv_type":          cv_type,
             "n_splits":         n_splits,
@@ -183,6 +183,7 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
             "datetime_col":     datetime_col,
             "target_col":       target_col,
             "target_type":      target_type,
+            "cv_strategy_hint": brief.get("cv_strategy_hint", ""),
             "mismatch_risk":    mismatch_reason,
             "hitl_required":    True,
         }
@@ -242,6 +243,7 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
         "target_type":      target_type,
         "scorer_name":      scorer_name,
         "task_type":        task_type,
+        "cv_strategy_hint": brief.get("cv_strategy_hint", ""),
         "mismatch_risk":    None,
         "hitl_required":    False,
     }

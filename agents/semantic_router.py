@@ -47,7 +47,10 @@ def run_semantic_router(state: ProfessorState) -> ProfessorState:
     # ── Update competition strategy ───────────────────────────────
     comp_context = dict(state.get("competition_context", {}))
     if comp_context:
-        comp_context["strategy"] = _determine_strategy(comp_context)
+        comp_context["strategy"] = _determine_strategy(
+            comp_context.get("current_percentile"),
+            comp_context.get("days_remaining")
+        )
         print(f"[SemanticRouter] Strategy: {comp_context['strategy']}")
 
     return {
@@ -81,13 +84,11 @@ def _detect_task_type(competition_name: str) -> str:
     return "tabular_classification"
 
 
-def _determine_strategy(context: dict) -> str:
+def _determine_strategy(percentile: float, days_remaining: float) -> str:
     """
     Called by router after every submission or at pipeline start.
     Returns the strategy the Supervisor should use for routing.
     """
-    percentile    = context.get("current_percentile")
-    days_remaining = context.get("days_remaining")
 
     if percentile is None or days_remaining is None:
         return "balanced"  # not enough data yet

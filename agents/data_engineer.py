@@ -53,13 +53,16 @@ def _build_preprocessing_code(
     Uses ONLY standard Polars calls — no project module imports.
     Sandbox writes cleaned.parquet. Profiling/schema done outside sandbox.
     """
+    raw_str = raw_data_path.replace("\\", "/")
+    out_dir_str = output_dir.replace("\\", "/")
+    
     return f"""
 import polars as pl
 import polars.selectors as cs
 import os
 
 # ── Load raw data ─────────────────────────────────────────────────
-df = pl.read_csv("{raw_data_path}", infer_schema_length=10000)
+df = pl.read_csv("{raw_str}", infer_schema_length=10000)
 print(f"Loaded: {{df.shape[0]}} rows, {{df.shape[1]}} columns")
 
 # ── Profile BEFORE cleaning ───────────────────────────────────────
@@ -87,8 +90,8 @@ for col in df.select(cs.boolean()).columns:
 print(f"After cleaning: {{df.shape[0]}} rows, {{df.null_count().sum_horizontal().item()}} nulls")
 
 # ── Write cleaned parquet ─────────────────────────────────────────
-os.makedirs("{output_dir}", exist_ok=True)
-parquet_path = "{output_dir}/cleaned.parquet"
+os.makedirs("{out_dir_str}", exist_ok=True)
+parquet_path = "{out_dir_str}/cleaned.parquet"
 df.write_parquet(parquet_path)
 print(f"Saved: {{parquet_path}}")
 print("DATA_ENGINEER_COMPLETE")

@@ -113,11 +113,14 @@ def profile_data(df: pl.DataFrame) -> dict:
     categorical_cols = df.select(cs.string()).columns
     boolean_cols     = df.select(cs.boolean()).columns
 
-    # Cardinality for categoricals (useful for encoding decisions)
-    cardinality = {
-        col: int(df[col].n_unique())
-        for col in categorical_cols
-    }
+    # Cardinality for categoricals and low-cardinality numeric targets
+    cardinality = {}
+    for col in df.columns:
+        if col in categorical_cols:
+            cardinality[col] = int(df[col].n_unique())
+        elif df[col].n_unique() <= 100:
+            cardinality[col] = int(df[col].n_unique())
+
 
     return {
         "columns":          df.columns,

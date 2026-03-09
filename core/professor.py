@@ -96,7 +96,73 @@ def _advance_dag(state: ProfessorState, current: str) -> str:
     return next_node
 
 
-# ── Submit node — validated submission via submit_tools ────────────
+# -- Parallel execution groups (Day 9) ------------------------------------
+
+def _fan_out_intelligence(state: ProfessorState) -> list:
+    """
+    Fan-out node: dispatches to competition_intel and data_engineer in parallel.
+    Returns a list of Send objects -- LangGraph executes them concurrently.
+    """
+    from langgraph.types import Send
+    return [
+        Send("competition_intel", state),
+        Send("data_engineer",     state),
+    ]
+
+
+def _fan_out_model_trials(state: ProfessorState) -> list:
+    """
+    Fan-out node: dispatches one trial per model type.
+    Each trial runs in its own E2B sandbox subprocess -- true parallelism.
+    """
+    from langgraph.types import Send
+    model_types = ["lgbm", "xgb", "catboost"]
+    return [
+        Send("run_model_trial", {**state, "trial_model_type": model})
+        for model in model_types
+    ]
+
+
+def _fan_out_critic_vectors(state: ProfessorState) -> list:
+    """
+    Fan-out node: all 4 critic vectors are fully independent.
+    Order does not matter. Slowest vector determines total critic time.
+    """
+    from langgraph.types import Send
+    vectors = [1, 2, 3, 4]
+    return [
+        Send("run_critic_vector", {**state, "critic_vector_id": v})
+        for v in vectors
+    ]
+
+
+def _intelligence_fan_join(state: ProfessorState) -> ProfessorState:
+    """
+    Fan-join after competition_intel + data_engineer.
+    Verifies both outputs exist before handing off to eda_agent.
+    """
+    missing = []
+    if not state.get("schema_path") or not os.path.exists(state.get("schema_path", "")):
+        missing.append("schema.json (data_engineer)")
+    if not state.get("competition_brief_path"):
+        missing.append("competition_brief.json (competition_intel)")
+
+    if missing:
+        raise ValueError(
+            f"[FanJoin:intelligence] Expected outputs missing: {missing}. "
+            f"One or more parallel branches did not complete."
+        )
+
+    parallel_groups = dict(state.get("parallel_groups", {}))
+    intelligence = dict(parallel_groups.get("intelligence", {}))
+    intelligence["status"] = "complete"
+    parallel_groups["intelligence"] = intelligence
+
+    return {**state, "parallel_groups": parallel_groups}
+
+
+# -- Submit node --- validated submission via submit_tools ----------------
+
 
 def run_submit(state: ProfessorState) -> ProfessorState:
     """

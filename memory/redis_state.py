@@ -65,12 +65,15 @@ class _DictRedis:
 
     def __init__(self):
         self._store = {}
+        self._ttls = {}
 
     def ping(self):
         return True
 
     def set(self, key, value, ex=None, **kwargs):
         self._store[key] = value
+        if ex is not None:
+            self._ttls[key] = ex
         return True
 
     def get(self, key):
@@ -79,9 +82,15 @@ class _DictRedis:
     def delete(self, *keys):
         for k in keys:
             self._store.pop(k, None)
+            self._ttls.pop(k, None)
 
     def exists(self, key):
         return key in self._store
+
+    def ttl(self, key):
+        if key not in self._store:
+            return -2  # key does not exist
+        return self._ttls.get(key, -1)  # -1 = no expiry set
 
 
 def save_state(session_id: str, state: dict, ttl_seconds: int = 86400 * 7) -> bool:

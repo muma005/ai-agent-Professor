@@ -108,7 +108,13 @@ def handle_escalation(
 
     elif level == EscalationLevel.HITL:
         # Save full state to Redis, pause pipeline, alert human
-        _checkpoint_state_to_redis(state, agent_name, error)
+        try:
+            _checkpoint_state_to_redis(state, agent_name, error)
+        except Exception as redis_err:
+            logger.warning(
+                f"[CircuitBreaker] Redis checkpoint failed (non-fatal): {redis_err}. "
+                f"HITL will proceed without persistent checkpoint."
+            )
         return {
             **state,
             "hitl_required":  True,

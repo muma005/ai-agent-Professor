@@ -78,10 +78,11 @@ def _validate_imports(code: str) -> Optional[str]:
     return None
 
 
-def _execute_once(code: str, session_id: str, timeout_seconds: int = 600) -> dict:
+def _execute_once(code: str, session_id: str, timeout_seconds: int = 600,
+                  extra_files: dict = None) -> dict:
     """
     Single execution attempt via subprocess.
-    Returns: {success, stdout, stderr, result}
+    Returns: {success, stdout, stderr, result, timed_out, returncode}
     """
     full_code = SANDBOX_PREAMBLE + code
 
@@ -94,6 +95,8 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600) -> dic
             "stderr": import_error,
             "error": "ImportError",
             "traceback": import_error,
+            "timed_out": False,
+            "returncode": 1,
         }
 
     # Ensure output directory exists
@@ -112,6 +115,13 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600) -> dic
         ) as f:
             f.write(full_code)
             script_path = f.name
+
+        # Write extra files into the output dir (cwd for subprocess)
+        if extra_files:
+            for fname, content in extra_files.items():
+                fpath = os.path.join(os.getcwd(), fname)
+                with open(fpath, "w", encoding="utf-8") as ef:
+                    ef.write(content)
 
         result = subprocess.run(
             [sys.executable, script_path],
@@ -132,8 +142,10 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600) -> dic
             "success": result.returncode == 0,
             "stdout": result.stdout,
             "stderr": result.stderr,
-            "result": None,  # subprocess can't return Python objects
+            "result": None,
             "globals": {},
+            "timed_out": False,
+            "returncode": result.returncode,
         }
 
     except subprocess.TimeoutExpired as e:
@@ -147,6 +159,8 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600) -> dic
             "stderr": f"TIMEOUT: Code exceeded {timeout_seconds}s execution limit",
             "error": "SandboxTimeoutError",
             "traceback": "Execution timeout",
+            "timed_out": True,
+            "returncode": -1,
         }
 
     except Exception as e:
@@ -160,6 +174,8 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600) -> dic
             "stderr": str(e),
             "error": type(e).__name__,
             "traceback": traceback.format_exc(),
+            "timed_out": False,
+            "returncode": 1,
         }
 
 
@@ -239,9 +255,11 @@ Stdout before failure:
     )
 
 
-def run_in_sandbox(code: str, timeout: int = SANDBOX_TIMEOUT_S, **kwargs) -> dict:
-    """Standalone sandbox execution — used by service_health.py fallback."""
-    return _execute_once(code, session_id="standalone", timeout_seconds=timeout)
+def run_in_sandbox(code: str, timeout: int = SANDBOX_TIMEOUT_S,
+                   extra_files: dict = None, **kwargs) -> dict:
+    """Standalone sandbox execution -- used by service_health.py fallback."""
+    return _execute_once(code, session_id="standalone", timeout_seconds=timeout,
+                         extra_files=extra_files)
 
 
 def run_in_subprocess_sandbox(code: str, timeout: int = SANDBOX_TIMEOUT_S, **kwargs) -> dict:

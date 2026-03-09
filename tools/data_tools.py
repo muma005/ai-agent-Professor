@@ -113,11 +113,14 @@ def profile_data(df: pl.DataFrame) -> dict:
     categorical_cols = df.select(cs.string()).columns
     boolean_cols     = df.select(cs.boolean()).columns
 
-    # Cardinality for categoricals (useful for encoding decisions)
-    cardinality = {
-        col: int(df[col].n_unique())
-        for col in categorical_cols
-    }
+    # Cardinality for categoricals and low-cardinality numeric targets
+    cardinality = {}
+    for col in df.columns:
+        if col in categorical_cols:
+            cardinality[col] = int(df[col].n_unique())
+        elif df[col].n_unique() <= 100:
+            cardinality[col] = int(df[col].n_unique())
+
 
     return {
         "columns":          df.columns,
@@ -144,6 +147,19 @@ def hash_file(path: str, length: int = 16) -> str:
         raise FileNotFoundError(f"Cannot hash — file not found: {path}")
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()[:length]
+
+
+def hash_dataset(file_path: str) -> str:
+    """
+    SHA-256 of raw file bytes, truncated to 16 hex chars.
+    Called by Data Engineer on every data load.
+    Stored in ProfessorState and in every model_registry entry.
+    """
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()[:16]
 
 
 def hash_dataframe(df: pl.DataFrame, length: int = 16) -> str:

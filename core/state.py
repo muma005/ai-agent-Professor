@@ -1,6 +1,6 @@
 # core/state.py
 
-from typing import TypedDict, Optional, Any, Annotated
+from typing import TypedDict, Optional, Any, Annotated, Literal
 import operator
 import uuid
 from datetime import datetime
@@ -50,15 +50,21 @@ class ProfessorState(TypedDict):
 
     # ── Competition ───────────────────────────────────────────────
     competition_name: str
-    task_type: str               # "tabular_classification" | "tabular_regression" | "timeseries" | "auto"
-    competition_context: Optional[CompetitionContext]
+    task_type: Literal["tabular", "timeseries", "nlp", "image", "unknown"]
+    competition_context: dict
+
+    # ── Intel ─────────────────────────────────────────────────────
+    competition_brief_path: str
+    competition_brief: dict
+    intel_brief_path: str
 
     # ── Data (pointers only -- never raw DataFrames in state) ─────
     raw_data_path: str
-    clean_data_path: Optional[str]
+    clean_data_path: str
+    eda_report_path: str
+    eda_report: dict
     schema_path: Optional[str]
-    eda_report_path: Optional[str]
-    data_hash: Optional[str]     # SHA-256 of source file, first 16 chars
+    data_hash: str     # SHA-256 of source file, first 16 chars
 
     # ── Feature Engineering ───────────────────────────────────────
     # REPLACE: feature factory sets the full list each run
@@ -111,7 +117,7 @@ def initial_state(
     competition: str,
     data_path: str,
     budget_usd: float = 2.00,
-    task_type: str = "auto"
+    task_type: str = "unknown"
 ) -> ProfessorState:
     """Create a fresh state for a new competition run."""
 
@@ -122,12 +128,24 @@ def initial_state(
         created_at=datetime.utcnow().isoformat(),
         competition_name=competition,
         task_type=task_type,
-        competition_context=None,
+        competition_context={
+            "days_remaining":        None,
+            "hours_remaining":       None,
+            "submissions_used":      0,
+            "submissions_remaining": None,
+            "current_public_rank":   None,
+            "total_competitors":     None,
+            "current_percentile":    None,
+            "shakeup_risk":          "unknown",
+            "strategy":              "balanced",
+            "last_updated":          None,
+        },
         raw_data_path=data_path,
-        clean_data_path=None,
+        clean_data_path="",
+        eda_report_path="",
+        eda_report={},
         schema_path=None,
-        eda_report_path=None,
-        data_hash=None,
+        data_hash="",
         feature_manifest=None,
         feature_factory_checkpoint=None,
         cv_strategy=None,

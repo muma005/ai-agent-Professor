@@ -88,6 +88,10 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
 
     print(f"[MLOptimizer] Starting — session: {session_id}")
 
+    if state.get("hitl_required"):
+        print("[MLOptimizer] HALTED: hitl_required flag is set.")
+        return {**state, "ml_optimizer_ran": False}
+
     # ── Load data ─────────────────────────────────────────────────
     if not state.get("clean_data_path"):
         raise ValueError("[MLOptimizer] clean_data_path not in state — run Data Engineer first")
@@ -120,7 +124,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     n_folds   = 5
     task_type = contract.task_type
 
-    if task_type == "classification":
+    if "classification" in task_type:
         cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
     else:
         cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
@@ -136,7 +140,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         y_train, y_val = y[train_idx], y[val_idx]
 
         # Build model — Phase 1: default params
-        if task_type == "classification":
+        if "classification" in task_type:
             model = LGBMClassifier(
                 n_estimators=500,
                 learning_rate=0.05,
@@ -225,7 +229,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "cv_mean":     cv_mean,
         "cv_std":      cv_std,
         "scorer_name": contract.scorer_name,
-        "data_hash":   state.get("data_hash"),
+        "data_hash":   state.get("data_hash", ""),
         "fold_scores": fold_scores,
     }
     existing_registry.append(new_registry_entry)

@@ -17,7 +17,10 @@ import polars.selectors as cs
 from langgraph.graph import StateGraph, END
 from core.state import ProfessorState
 from agents.semantic_router import run_semantic_router
+from agents.competition_intel import run_competition_intel
 from agents.data_engineer import run_data_engineer
+from agents.eda_agent import run_eda_agent
+from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 
 
@@ -25,20 +28,37 @@ from agents.ml_optimizer import run_ml_optimizer
 
 def route_after_router(state: ProfessorState) -> str:
     """After router runs: go to first node in DAG."""
-    next_node = state.get("next_node")
-    dag       = state.get("dag", [])
-
+    dag = state.get("dag", [])
     if not dag:
         print("[Professor] WARNING: DAG is empty after router. Ending.")
         return END
 
+    next_node = dag[0]
     print(f"[Professor] Routing to: {next_node}")
     return next_node
 
 
+def route_after_intel(state: ProfessorState) -> str:
+    """After Competition Intel: advance to Data Engineer."""
+    return _advance_dag(state, current="competition_intel")
+
+
 def route_after_data_engineer(state: ProfessorState) -> str:
-    """After Data Engineer: advance to next node in DAG."""
+    """After Data Engineer: advance to EDA Agent."""
     return _advance_dag(state, current="data_engineer")
+
+
+def route_after_eda(state: ProfessorState) -> str:
+    """After EDA Agent: advance to Validation Architect."""
+    return _advance_dag(state, current="eda_agent")
+
+
+def route_after_validation(state: ProfessorState) -> str:
+    """After Validation Architect: halt if HITL required, else advance."""
+    if state.get("hitl_required"):
+        print("[Professor] HITL required. Halting execution.")
+        return END
+    return _advance_dag(state, current="validation_architect")
 
 
 def route_after_optimizer(state: ProfessorState) -> str:
@@ -204,7 +224,10 @@ def build_graph() -> StateGraph:
 
     # ── Add nodes ─────────────────────────────────────────────────
     graph.add_node("semantic_router", run_semantic_router)
+    graph.add_node("competition_intel", run_competition_intel)
     graph.add_node("data_engineer",   run_data_engineer)
+    graph.add_node("eda_agent",       run_eda_agent)
+    graph.add_node("validation_architect", run_validation_architect)
     graph.add_node("ml_optimizer",    run_ml_optimizer)
     graph.add_node("submit",          run_submit)
 
@@ -216,14 +239,41 @@ def build_graph() -> StateGraph:
         "semantic_router",
         route_after_router,
         {
+            "competition_intel": "competition_intel",
+            END:             END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "competition_intel",
+        route_after_intel,
+        {
             "data_engineer": "data_engineer",
-            END:              END,
+            END:             END,
         }
     )
 
     graph.add_conditional_edges(
         "data_engineer",
         route_after_data_engineer,
+        {
+            "eda_agent": "eda_agent",
+            END:             END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "eda_agent",
+        route_after_eda,
+        {
+            "validation_architect": "validation_architect",
+            END:             END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "validation_architect",
+        route_after_validation,
         {
             "ml_optimizer": "ml_optimizer",
             END:             END,

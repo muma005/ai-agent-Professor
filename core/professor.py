@@ -158,12 +158,15 @@ def run_submit(state: ProfessorState) -> ProfessorState:
     )
 
     # ── Log to submission ladder ──────────────────────────────────
-    save_submission_log(
+    entry = save_submission_log(
         session_id=session_id,
         submission_path=submission_path,
         cv_mean=state.get("cv_mean", 0.0),
         notes=f"Phase 1 baseline -- {competition}"
     )
+    
+    existing_log = list(state.get("submission_log") or [])
+    existing_log.append(entry)
 
     # ── Log lineage ──────────────────────────────────────────────
     log_event(
@@ -182,6 +185,7 @@ def run_submit(state: ProfessorState) -> ProfessorState:
     return {
         **state,
         "submission_path": submission_path,
+        "submission_log": existing_log,
     }
 
 

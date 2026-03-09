@@ -73,8 +73,8 @@ class ProfessorState(TypedDict):
     cv_mean: Optional[float]
 
     # ── Models ────────────────────────────────────────────────────
-    # ACCUMULATE: every training run adds entries, never replaced wholesale
-    model_registry: Annotated[Optional[list], operator.add]
+    # REPLACE: managed manually by the node before returning
+    model_registry: Annotated[Optional[list], _replace]
     best_params: Optional[dict]
     optuna_study_path: Optional[str]
 
@@ -88,8 +88,8 @@ class ProfessorState(TypedDict):
 
     # ── Submission ────────────────────────────────────────────────
     submission_path: Optional[str]
-    # ACCUMULATE: every submission adds a log entry
-    submission_log: Annotated[Optional[list], operator.add]
+    # REPLACE: managed manually by the node before returning
+    submission_log: Annotated[Optional[list], _replace]
 
     # ── Routing ───────────────────────────────────────────────────
     # REPLACE: router sets the full route, optimizer never appends to it

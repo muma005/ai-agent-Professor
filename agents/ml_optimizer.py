@@ -217,10 +217,9 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         json.dump(metrics, f, indent=2)
 
     # ── Build new model registry entry ─────────────────────────────
-    # NOTE: With Annotated[list, operator.add] in ProfessorState,
-    # LangGraph concatenates the returned list with existing state.
-    # So we return ONLY the new entry, not a copy of the full list.
-    new_registry_entry = [{
+    # Manually append the new model since we use _replace reducer
+    existing_registry = list(state.get("model_registry") or [])
+    new_registry_entry = {
         "model_path":  model_path,
         "model_type":  "lightgbm_v0",
         "cv_mean":     cv_mean,
@@ -228,7 +227,8 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "scorer_name": contract.scorer_name,
         "data_hash":   state.get("data_hash"),
         "fold_scores": fold_scores,
-    }]
+    }
+    existing_registry.append(new_registry_entry)
 
     # ── Update cost tracker ───────────────────────────────────────
     cost_tracker = dict(state["cost_tracker"])
@@ -264,7 +264,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         **state,
         "cv_scores":            fold_scores,
         "cv_mean":              cv_mean,
-        "model_registry":       new_registry_entry,
+        "model_registry":       existing_registry,
         "metric_contract":      metrics,
         "oof_predictions_path": oof_path,
         "cost_tracker":         cost_tracker,

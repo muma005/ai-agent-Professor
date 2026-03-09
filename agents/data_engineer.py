@@ -6,7 +6,7 @@ from datetime import datetime
 from core.state import ProfessorState
 from tools.e2b_sandbox import execute_code, SandboxExecutionError
 from tools.llm_client import call_llm
-from tools.data_tools import hash_file, ensure_session_dirs
+from tools.data_tools import hash_dataset, ensure_session_dirs
 
 
 # ── LLM fix callback for sandbox retry loop ───────────────────────
@@ -122,7 +122,7 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
     ensure_session_dirs(session_id)
 
     # ── Hash the source file ──────────────────────────────────────
-    data_hash = hash_file(raw_path)
+    data_hash = hash_dataset(raw_path)
     print(f"[DataEngineer] data_hash: {data_hash}")
 
     # ── Build preprocessing code ──────────────────────────────────

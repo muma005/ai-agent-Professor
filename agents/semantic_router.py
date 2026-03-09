@@ -35,18 +35,25 @@ def run_semantic_router(state: ProfessorState) -> ProfessorState:
     print(f"[SemanticRouter] Competition: {competition}")
 
     # ── Task type detection — v0: rule-based, v1: LLM-driven ─────
-    if task_type == "auto":
+    if task_type in ("auto", "unknown"):
         task_type = _detect_task_type(competition)
 
     print(f"[SemanticRouter] Task type: {task_type}")
     print(f"[SemanticRouter] Route: {' -> '.join(LINEAR_ROUTE_V0)}")
 
+    # ── Update competition strategy ───────────────────────────────
+    comp_context = dict(state.get("competition_context", {}))
+    if comp_context:
+        comp_context["strategy"] = _determine_strategy(comp_context)
+        print(f"[SemanticRouter] Strategy: {comp_context['strategy']}")
+
     return {
         **state,
-        "task_type":    task_type,
-        "dag":          LINEAR_ROUTE_V0.copy(),
-        "current_node": "semantic_router",
-        "next_node":    LINEAR_ROUTE_V0[0],
+        "task_type":           task_type,
+        "competition_context": comp_context,
+        "dag":                 LINEAR_ROUTE_V0.copy(),
+        "current_node":        "semantic_router",
+        "next_node":           LINEAR_ROUTE_V0[0],
     }
 
 
@@ -69,3 +76,23 @@ def _detect_task_type(competition_name: str) -> str:
 
     # Default: classification
     return "tabular_classification"
+
+
+def _determine_strategy(context: dict) -> str:
+    """
+    Called by router after every submission or at pipeline start.
+    Returns the strategy the Supervisor should use for routing.
+    """
+    percentile    = context.get("current_percentile")
+    days_remaining = context.get("days_remaining")
+
+    if percentile is None or days_remaining is None:
+        return "balanced"  # not enough data yet
+
+    if days_remaining <= 2 and percentile <= 0.10:
+        return "conservative"   # top 10%, almost done — lock in the rank
+    if days_remaining <= 2 and percentile > 0.10:
+        return "aggressive"     # running out of time, need big moves
+    if days_remaining > 7 and percentile > 0.40:
+        return "aggressive"     # plenty of time, far from goal
+    return "balanced"

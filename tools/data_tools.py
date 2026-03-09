@@ -146,6 +146,19 @@ def hash_file(path: str, length: int = 16) -> str:
         return hashlib.sha256(f.read()).hexdigest()[:length]
 
 
+def hash_dataset(file_path: str) -> str:
+    """
+    SHA-256 of raw file bytes, truncated to 16 hex chars.
+    Called by Data Engineer on every data load.
+    Stored in ProfessorState and in every model_registry entry.
+    """
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()[:16]
+
+
 def hash_dataframe(df: pl.DataFrame, length: int = 16) -> str:
     """
     SHA-256 hash of a Polars DataFrame's content.

@@ -225,7 +225,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "cv_mean":     cv_mean,
         "cv_std":      cv_std,
         "scorer_name": contract.scorer_name,
-        "data_hash":   state.get("data_hash"),
+        "data_hash":   state.get("data_hash", ""),
         "fold_scores": fold_scores,
     }
     existing_registry.append(new_registry_entry)

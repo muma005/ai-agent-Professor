@@ -8,6 +8,7 @@ from core.state import ProfessorState
 # Phase 2: replaced with LLM-driven DAG construction.
 
 LINEAR_ROUTE_V0 = [
+    "competition_intel",
     "data_engineer",
     "eda_agent",
     "validation_architect",

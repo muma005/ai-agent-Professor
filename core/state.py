@@ -53,6 +53,11 @@ class ProfessorState(TypedDict):
     task_type: Literal["tabular", "timeseries", "nlp", "image", "unknown"]
     competition_context: dict
 
+    # ── Intel ─────────────────────────────────────────────────────
+    competition_brief_path: str
+    competition_brief: dict
+    intel_brief_path: str
+
     # ── Data (pointers only -- never raw DataFrames in state) ─────
     raw_data_path: str
     clean_data_path: str

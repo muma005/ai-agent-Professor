@@ -17,6 +17,7 @@ import polars.selectors as cs
 from langgraph.graph import StateGraph, END
 from core.state import ProfessorState
 from agents.semantic_router import run_semantic_router
+from agents.competition_intel import run_competition_intel
 from agents.data_engineer import run_data_engineer
 from agents.eda_agent import run_eda_agent
 from agents.validation_architect import run_validation_architect
@@ -27,15 +28,19 @@ from agents.ml_optimizer import run_ml_optimizer
 
 def route_after_router(state: ProfessorState) -> str:
     """After router runs: go to first node in DAG."""
-    next_node = state.get("next_node")
-    dag       = state.get("dag", [])
-
+    dag = state.get("dag", [])
     if not dag:
         print("[Professor] WARNING: DAG is empty after router. Ending.")
         return END
 
+    next_node = dag[0]
     print(f"[Professor] Routing to: {next_node}")
     return next_node
+
+
+def route_after_intel(state: ProfessorState) -> str:
+    """After Competition Intel: advance to Data Engineer."""
+    return _advance_dag(state, current="competition_intel")
 
 
 def route_after_data_engineer(state: ProfessorState) -> str:
@@ -219,6 +224,7 @@ def build_graph() -> StateGraph:
 
     # ── Add nodes ─────────────────────────────────────────────────
     graph.add_node("semantic_router", run_semantic_router)
+    graph.add_node("competition_intel", run_competition_intel)
     graph.add_node("data_engineer",   run_data_engineer)
     graph.add_node("eda_agent",       run_eda_agent)
     graph.add_node("validation_architect", run_validation_architect)
@@ -233,8 +239,17 @@ def build_graph() -> StateGraph:
         "semantic_router",
         route_after_router,
         {
+            "competition_intel": "competition_intel",
+            END:             END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "competition_intel",
+        route_after_intel,
+        {
             "data_engineer": "data_engineer",
-            END:              END,
+            END:             END,
         }
     )
 

@@ -84,8 +84,13 @@ class ProfessorState(TypedDict):
     best_params: Optional[dict]
     optuna_study_path: Optional[str]
 
-    # ── Critic ────────────────────────────────────────────────────
+    # -- Critic (Day 10) -------------------------------------------
     critic_verdict: Optional[dict]
+    critic_verdict_path: str
+    critic_severity: str              # CRITICAL | HIGH | MEDIUM | OK | unchecked
+    replan_requested: bool
+    competition_fingerprint: dict     # built from EDA + schema
+    warm_start_priors: list           # retrieved from memory
 
     # ── Ensemble ──────────────────────────────────────────────────
     ensemble_weights: Optional[dict]
@@ -170,6 +175,11 @@ def initial_state(
         best_params=None,
         optuna_study_path=None,
         critic_verdict=None,
+        critic_verdict_path="",
+        critic_severity="unchecked",
+        replan_requested=False,
+        competition_fingerprint={},
+        warm_start_priors=[],
         ensemble_weights=None,
         oof_predictions_path=None,
         test_predictions_path=None,

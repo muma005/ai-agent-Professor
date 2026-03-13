@@ -131,7 +131,8 @@ class TestCriticCatchesInjectedLeakage:
         )
 
     def test_critical_verdict_sets_hitl_required(self):
-        """CRITICAL verdict must halt the pipeline."""
+        """Day 11 update: first CRITICAL sets replan_requested=True, not hitl_required.
+        Supervisor gets first shot at fixing. Only after MAX_REPLAN_ATTEMPTS → hitl."""
         import tempfile
         df = pl.read_csv(FIXTURE_CSV)
         target_col = df.columns[-1]
@@ -148,8 +149,12 @@ class TestCriticCatchesInjectedLeakage:
         result = run_red_team_critic(s)
         os.unlink(p)
 
-        assert result.get("hitl_required") is True, (
-            "CRITICAL verdict must set hitl_required=True to halt the pipeline."
+        # Day 11: first CRITICAL → replan_requested, NOT hitl_required
+        assert result.get("replan_requested") is True, (
+            "CRITICAL verdict must set replan_requested=True for supervisor."
+        )
+        assert result.get("hitl_required") is not True, (
+            "First CRITICAL should NOT set hitl_required — supervisor gets first attempt."
         )
 
     def test_critical_findings_have_replan_instructions(self):

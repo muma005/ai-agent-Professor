@@ -89,8 +89,21 @@ class ProfessorState(TypedDict):
     critic_verdict_path: str
     critic_severity: str              # CRITICAL | HIGH | MEDIUM | OK | unchecked
     replan_requested: bool
+    replan_remove_features: list      # features the critic wants dropped
+    replan_rerun_nodes: list          # nodes to re-run after replan
     competition_fingerprint: dict     # built from EDA + schema
     warm_start_priors: list           # retrieved from memory
+
+    # -- Supervisor Replan (Day 11) --------------------------------
+    features_dropped: list            # accumulated across all replan cycles
+
+    # -- Post-Mortem (Day 11) --------------------------------------
+    post_mortem_completed: bool
+    post_mortem_report_path: str
+    lb_score: Optional[float]
+    lb_rank: Optional[int]
+    cv_lb_gap: Optional[float]
+    gap_root_cause: str
 
     # ── Ensemble ──────────────────────────────────────────────────
     ensemble_weights: Optional[dict]
@@ -178,8 +191,19 @@ def initial_state(
         critic_verdict_path="",
         critic_severity="unchecked",
         replan_requested=False,
+        replan_remove_features=[],
+        replan_rerun_nodes=[],
         competition_fingerprint={},
         warm_start_priors=[],
+        # -- Supervisor Replan (Day 11) --
+        features_dropped=[],
+        # -- Post-Mortem (Day 11) --
+        post_mortem_completed=False,
+        post_mortem_report_path="",
+        lb_score=None,
+        lb_rank=None,
+        cv_lb_gap=None,
+        gap_root_cause="",
         ensemble_weights=None,
         oof_predictions_path=None,
         test_predictions_path=None,

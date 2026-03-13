@@ -263,9 +263,10 @@ class TestCriticVectorCoverage:
         required = {
             "shuffled_target", "id_only_model", "adversarial_classifier",
             "preprocessing_audit", "pr_curve_imbalance", "temporal_leakage",
+            "robustness",
         }
         missing = required - set(vc)
-        assert not missing, f"Vectors not checked: {missing}. All 6 must run."
+        assert not missing, f"Vectors not checked: {missing}. All 7 must run."
 
     # 2.2
     def test_shuffled_target_vector_not_trivially_passing(self):
@@ -389,7 +390,7 @@ class TestCriticSeverityEscalation:
                 f"Real leakage vector fired on clean data: {critical_real}"
             )
 
-    # 3.3
+    # 3.3 (Day 11 update: first CRITICAL → replan, not hitl)
     def test_critical_verdict_sets_hitl_required(self):
         df = pl.read_csv(FIXTURE_CSV)
         target_col = df.columns[-1]
@@ -403,7 +404,8 @@ class TestCriticSeverityEscalation:
         s = run_validation_architect(s)
         result = run_red_team_critic(s)
         os.unlink(p)
-        assert result.get("hitl_required") is True
+        # Day 11: first CRITICAL → replan_requested, supervisor handles first
+        assert result.get("replan_requested") is True
 
     # 3.4
     def test_critical_verdict_sets_replan_requested(self):
@@ -837,9 +839,9 @@ class TestFullPipelineWithCritic:
         s = run_validation_architect(s)
         result = run_red_team_critic(s)
         os.unlink(p)
-        assert result.get("hitl_required") is True, "CRITICAL must route to HITL"
-        # The conditional edge in professor.py checks hitl_required
-        # If hitl_required is True, the graph should NOT proceed to ensemble_architect
+        # Day 11: first CRITICAL → replan_requested, not hitl_required
+        assert result.get("replan_requested") is True, "CRITICAL must set replan_requested"
+        # The supervisor handles the replan first; only after MAX_REPLAN_ATTEMPTS → HITL
 
     # 7.3
     def test_ok_verdict_routes_to_ensemble(self):

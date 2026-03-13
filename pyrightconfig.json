@@ -1,0 +1,8 @@
+{
+    "include": ["."],
+    "venvPath": "C:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor",
+    "venv": "venv",
+    "extraPaths": ["C:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor"],
+    "pythonVersion": "3.13",
+    "pythonPlatform": "Windows"
+}

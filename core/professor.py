@@ -22,6 +22,8 @@ from agents.data_engineer import run_data_engineer
 from agents.eda_agent import run_eda_agent
 from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
+from agents.red_team_critic import run_red_team_critic
+from agents.supervisor import run_supervisor_replan, get_replan_target, MAX_REPLAN_ATTEMPTS, NODE_PRIORITY
 
 
 # ── Routing functions (conditional edges) ─────────────────────────
@@ -65,8 +67,40 @@ def route_after_validation(state: ProfessorState) -> str:
 
 
 def route_after_optimizer(state: ProfessorState) -> str:
-    """After Optimizer: advance to next node in DAG."""
+    """After Optimizer: advance to red_team_critic."""
     return _advance_dag(state, current="ml_optimizer")
+
+
+def route_after_critic(state: ProfessorState) -> str:
+    """After Critic: route based on severity.
+    CRITICAL → supervisor_replan (or hitl if exhausted).
+    HIGH/MEDIUM/OK → submit.
+    """
+    if state.get("pipeline_halted") or state.get("triage_mode"):
+        print("[Professor] Pipeline halted after critic. Ending.")
+        return END
+
+    severity = state.get("critic_severity", "unchecked")
+    if severity == "CRITICAL":
+        dag_version = state.get("dag_version", 1)
+        if dag_version >= MAX_REPLAN_ATTEMPTS:
+            print(f"[Professor] CRITICAL + dag_version={dag_version} >= {MAX_REPLAN_ATTEMPTS}. HITL required.")
+            return END  # hitl_handler — pipeline halted
+        print(f"[Professor] CRITICAL verdict. Routing to supervisor_replan (dag_version={dag_version}).")
+        return "supervisor_replan"
+    # HIGH, MEDIUM, OK: continue to submit
+    print(f"[Professor] Critic verdict: {severity}. Continuing to submit.")
+    return "submit"
+
+
+def route_after_supervisor_replan(state: ProfessorState) -> str:
+    """After supervisor_replan: re-enter at earliest affected node."""
+    if state.get("pipeline_halted"):
+        print("[Professor] Pipeline halted by supervisor. Ending.")
+        return END
+    target = get_replan_target(state)
+    print(f"[Professor] Supervisor replan complete. Re-entering at: {target}")
+    return target
 
 
 def _advance_dag(state: ProfessorState, current: str) -> str:
@@ -303,6 +337,8 @@ def build_graph() -> StateGraph:
     graph.add_node("eda_agent",       run_eda_agent)
     graph.add_node("validation_architect", run_validation_architect)
     graph.add_node("ml_optimizer",    run_ml_optimizer)
+    graph.add_node("red_team_critic", run_red_team_critic)
+    graph.add_node("supervisor_replan", run_supervisor_replan)
     graph.add_node("submit",          run_submit)
 
     # ── Set entry point ───────────────────────────────────────────
@@ -358,8 +394,29 @@ def build_graph() -> StateGraph:
         "ml_optimizer",
         route_after_optimizer,
         {
-            "submit": "submit",
-            END:       END,
+            "red_team_critic": "red_team_critic",
+            END:               END,
+        }
+    )
+
+    # Day 11: Critic → conditional routing
+    graph.add_conditional_edges(
+        "red_team_critic",
+        route_after_critic,
+        {
+            "supervisor_replan": "supervisor_replan",
+            "submit":            "submit",
+            END:                 END,
+        }
+    )
+
+    # Day 11: Supervisor replan → re-enter at earliest affected node
+    graph.add_conditional_edges(
+        "supervisor_replan",
+        route_after_supervisor_replan,
+        {
+            **{node: node for node in NODE_PRIORITY},
+            END: END,
         }
     )
 

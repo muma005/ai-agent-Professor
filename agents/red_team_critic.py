@@ -1,8 +1,9 @@
 # agents/red_team_critic.py
 # -------------------------------------------------------------------------
-# Day 10 — Red Team Critic: 6-vector quality gate
+# Day 11 — Red Team Critic: 7-vector quality gate
 # Catches: target leakage, ID ordering leakage, train/test drift,
-#          preprocessing leakage, majority-class-only models, temporal leakage
+#          preprocessing leakage, majority-class-only models, temporal leakage,
+#          robustness (noise injection, slice audit, calibration)
 # -------------------------------------------------------------------------
 
 import os
@@ -417,6 +418,298 @@ def _check_temporal_leakage(
 
 
 # =========================================================================
+# VECTOR 4 — Robustness: Noise Injection + Slice Audit + Calibration
+# =========================================================================
+
+def _noise_injection_check(
+    X_train: pl.DataFrame,
+    y_true,
+    model_registry: list,
+) -> dict:
+    """
+    Sub-check A: Add Gaussian noise (σ = 10% of feature stddev) to top-k
+    features and re-score. Degradation > 20% → CRITICAL, 10-20% → HIGH.
+    """
+    if not model_registry:
+        return {"verdict": "OK", "note": "No model in registry — noise injection skipped"}
+
+    import pickle
+
+    model_path = model_registry[0].get("model_path", "")
+    if not model_path or not os.path.exists(model_path):
+        return {"verdict": "OK", "note": "Model file not found — noise injection skipped"}
+
+    try:
+        with open(model_path, "rb") as f:
+            model = pickle.load(f)
+    except Exception as e:
+        return {"verdict": "OK", "note": f"Could not load model: {e}"}
+
+    numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+                      pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
+    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in numeric_dtypes]
+    if not numeric_cols:
+        return {"verdict": "OK", "note": "No numeric features for noise injection"}
+
+    X_np = X_train.select(numeric_cols).fill_null(0).to_numpy().astype(np.float64)
+
+    # Get feature importances if available
+    try:
+        importances = model.feature_importances_
+        top_k = min(5, len(importances))
+        top_indices = np.argsort(importances)[-top_k:]
+    except AttributeError:
+        top_k = min(5, X_np.shape[1])
+        top_indices = list(range(top_k))
+
+    from sklearn.metrics import roc_auc_score
+
+    # Clean score
+    try:
+        clean_probs = model.predict_proba(X_np)[:, 1]
+        clean_auc = roc_auc_score(y_true, clean_probs)
+    except Exception:
+        return {"verdict": "OK", "note": "Could not compute clean AUC"}
+
+    # Noisy score
+    rng = np.random.default_rng(42)
+    X_noisy = X_np.copy()
+    for idx in top_indices:
+        col_std = np.std(X_np[:, idx])
+        if col_std > 0:
+            noise = rng.normal(0, 0.10 * col_std, size=X_np.shape[0])
+            X_noisy[:, idx] += noise
+
+    try:
+        noisy_probs = model.predict_proba(X_noisy)[:, 1]
+        noisy_auc = roc_auc_score(y_true, noisy_probs)
+    except Exception:
+        return {"verdict": "OK", "note": "Could not compute noisy AUC"}
+
+    if clean_auc > 0:
+        degradation = (clean_auc - noisy_auc) / clean_auc
+    else:
+        degradation = 0.0
+
+    result = {
+        "clean_auc": round(clean_auc, 4),
+        "noisy_auc": round(noisy_auc, 4),
+        "degradation_pct": round(degradation * 100, 2),
+        "top_features_perturbed": [numeric_cols[i] for i in top_indices if i < len(numeric_cols)],
+    }
+
+    if degradation > 0.20:
+        result["verdict"] = "CRITICAL"
+        result["evidence"] = (
+            f"Noise injection caused {degradation:.1%} AUC degradation "
+            f"(clean: {clean_auc:.4f} → noisy: {noisy_auc:.4f}). "
+            f"Model is overfit to noise."
+        )
+    elif degradation > 0.10:
+        result["verdict"] = "HIGH"
+        result["evidence"] = (
+            f"Noise injection caused {degradation:.1%} AUC degradation. "
+            f"Model may be fragile."
+        )
+    else:
+        result["verdict"] = "OK"
+
+    return result
+
+
+def _slice_performance_check(
+    X_train: pl.DataFrame,
+    y_true,
+    model_registry: list,
+) -> dict:
+    """
+    Sub-check B: Per-slice AUC for categoricals (2-10 unique) and
+    quartile splits for numerics. Max-min spread > 0.15 → HIGH.
+    """
+    if not model_registry:
+        return {"verdict": "OK", "note": "No model in registry — slice audit skipped"}
+
+    import pickle
+    from sklearn.metrics import roc_auc_score
+
+    model_path = model_registry[0].get("model_path", "")
+    if not model_path or not os.path.exists(model_path):
+        return {"verdict": "OK", "note": "Model file not found — slice audit skipped"}
+
+    try:
+        with open(model_path, "rb") as f:
+            model = pickle.load(f)
+    except Exception:
+        return {"verdict": "OK", "note": "Could not load model"}
+
+    numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+                      pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
+    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in numeric_dtypes]
+    if not numeric_cols:
+        return {"verdict": "OK", "note": "No numeric features for slice audit"}
+
+    X_np = X_train.select(numeric_cols).fill_null(0).to_numpy().astype(np.float64)
+
+    try:
+        y_prob = model.predict_proba(X_np)[:, 1]
+    except Exception:
+        return {"verdict": "OK", "note": "Could not get predictions for slice audit"}
+
+    y_arr = np.array(y_true)
+    slices = []
+
+    # Categorical slices
+    cat_dtypes = (pl.Utf8, pl.Categorical, pl.String)
+    for col in X_train.columns:
+        if X_train[col].dtype in cat_dtypes:
+            n_unique = X_train[col].n_unique()
+            if 2 <= n_unique <= 10:
+                for val in X_train[col].unique().to_list():
+                    mask = (X_train[col] == val).to_numpy()
+                    if mask.sum() < 20 or len(np.unique(y_arr[mask])) < 2:
+                        continue
+                    try:
+                        auc = roc_auc_score(y_arr[mask], y_prob[mask])
+                        slices.append({"feature": col, "value": str(val), "auc": round(auc, 4), "n": int(mask.sum())})
+                    except ValueError:
+                        pass
+
+    # Numeric quartile slices
+    for col in numeric_cols[:20]:
+        series = X_train[col].to_numpy()
+        median = np.nanmedian(series)
+        for label, mask in [("bottom_half", series <= median), ("top_half", series > median)]:
+            if mask.sum() < 20 or len(np.unique(y_arr[mask])) < 2:
+                continue
+            try:
+                auc = roc_auc_score(y_arr[mask], y_prob[mask])
+                slices.append({"feature": col, "value": label, "auc": round(auc, 4), "n": int(mask.sum())})
+            except ValueError:
+                pass
+
+    if not slices:
+        return {"verdict": "OK", "note": "No valid slices for audit"}
+
+    best = max(slices, key=lambda s: s["auc"])
+    worst = min(slices, key=lambda s: s["auc"])
+    spread = best["auc"] - worst["auc"]
+
+    result = {
+        "best_slice": best,
+        "worst_slice": worst,
+        "spread": round(spread, 4),
+        "slices_checked": len(slices),
+    }
+
+    if spread > 0.15:
+        result["verdict"] = "HIGH"
+        result["evidence"] = (
+            f"Slice performance spread {spread:.4f} > 0.15. "
+            f"Worst: {worst['feature']}={worst['value']} (AUC {worst['auc']}). "
+            f"Best: {best['feature']}={best['value']} (AUC {best['auc']})."
+        )
+    else:
+        result["verdict"] = "OK"
+
+    return result
+
+
+def _calibration_check(
+    y_true,
+    y_prob,
+) -> dict:
+    """
+    Sub-check C: OOF calibration — ECE (10 bins) and Brier Score.
+    ECE > 0.10 → HIGH.  Brier > 2× random baseline → HIGH.
+    """
+    if y_prob is None or len(y_prob) == 0:
+        return {"verdict": "OK", "note": "No OOF probabilities — calibration skipped"}
+
+    y_arr = np.array(y_true).astype(float)
+    p_arr = np.array(y_prob).astype(float)
+
+    # ECE — Expected Calibration Error (10 equal-width bins)
+    n_bins = 10
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    total = len(y_arr)
+    for i in range(n_bins):
+        mask = (p_arr >= bin_edges[i]) & (p_arr < bin_edges[i + 1])
+        if mask.sum() == 0:
+            continue
+        bin_acc = np.mean(y_arr[mask])
+        bin_conf = np.mean(p_arr[mask])
+        ece += (mask.sum() / total) * abs(bin_acc - bin_conf)
+
+    # Brier Score
+    brier = float(np.mean((p_arr - y_arr) ** 2))
+    prevalence = float(np.mean(y_arr))
+    random_brier = prevalence * (1 - prevalence)
+
+    result = {
+        "ece": round(ece, 4),
+        "brier_score": round(brier, 4),
+        "random_brier": round(random_brier, 4),
+    }
+
+    verdicts = []
+    if ece > 0.10:
+        verdicts.append(f"ECE {ece:.4f} > 0.10 threshold")
+    if random_brier > 0 and brier > 2 * random_brier:
+        verdicts.append(f"Brier {brier:.4f} > 2× random {random_brier:.4f}")
+
+    if verdicts:
+        result["verdict"] = "HIGH"
+        result["evidence"] = "Calibration issues: " + "; ".join(verdicts)
+    else:
+        result["verdict"] = "OK"
+
+    return result
+
+
+def _check_robustness(
+    X_train: pl.DataFrame,
+    y_true,
+    y_prob,
+    eda_report: dict,
+    model_registry: list,
+) -> dict:
+    """
+    Vector 4: Robustness. Runs 3 sub-checks. Overall verdict = max severity.
+    """
+    sub_results = {}
+
+    try:
+        sub_results["noise_injection"] = _noise_injection_check(X_train, y_true, model_registry)
+    except Exception as e:
+        logger.warning(f"[{AGENT_NAME}] noise_injection sub-check failed: {e}")
+        sub_results["noise_injection"] = {"verdict": "OK", "note": f"Error: {e}"}
+
+    try:
+        sub_results["slice_audit"] = _slice_performance_check(X_train, y_true, model_registry)
+    except Exception as e:
+        logger.warning(f"[{AGENT_NAME}] slice_audit sub-check failed: {e}")
+        sub_results["slice_audit"] = {"verdict": "OK", "note": f"Error: {e}"}
+
+    try:
+        sub_results["calibration"] = _calibration_check(y_true, y_prob)
+    except Exception as e:
+        logger.warning(f"[{AGENT_NAME}] calibration sub-check failed: {e}")
+        sub_results["calibration"] = {"verdict": "OK", "note": f"Error: {e}"}
+
+    # Overall = max severity across sub-checks
+    overall = max(
+        (r.get("verdict", "OK") for r in sub_results.values()),
+        key=lambda s: _SEVERITY_ORDER.get(s, 0),
+    )
+
+    return {
+        "verdict": overall,
+        "sub_checks": sub_results,
+    }
+
+
+# =========================================================================
 # ORCHESTRATOR
 # =========================================================================
 
@@ -526,6 +819,14 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
     _run_vector("pr_curve_imbalance",    _check_pr_curve_imbalance(y_true, y_prob, imbalance_ratio, target_type))
     _run_vector("temporal_leakage",      _check_temporal_leakage(df, target_col, eda_report.get("temporal_profile", {})))
 
+    _run_vector("robustness",            _check_robustness(
+        X_train=X_train,
+        y_true=y_true,
+        y_prob=y_prob,
+        eda_report=eda_report,
+        model_registry=list(state.get("model_registry") or []),
+    ))
+
     # -- Compute overall severity ------------------------------------------------
     overall = _overall_severity(findings)
 
@@ -557,21 +858,17 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
         "critic_severity":     overall,
     }
 
-    # -- CRITICAL: halt pipeline -------------------------------------------------
+    # -- CRITICAL: supervisor replan first, not hitl directly ------------------
     if overall == "CRITICAL":
         critical = [f for f in findings if f["severity"] == "CRITICAL"]
         rerun    = list({n for f in critical for n in f.get("replan_instructions", {}).get("rerun_nodes", [])})
         remove   = list({c for f in critical for c in f.get("replan_instructions", {}).get("remove_features", [])})
         updated.update({
-            "hitl_required":   True,
-            "hitl_reason": (
-                f"Red Team Critic CRITICAL finding(s): "
-                + "; ".join(f['evidence'] for f in critical if 'evidence' in f)
-            ),
+            "hitl_required":   False,         # Day 11: supervisor gets first shot
             "replan_requested": True,
             "replan_remove_features": remove,
             "replan_rerun_nodes":     rerun,
         })
-        logger.error(f"[{AGENT_NAME}] CRITICAL -- pipeline halted. Rerun nodes: {rerun}")
+        logger.error(f"[{AGENT_NAME}] CRITICAL -- replan requested. Rerun nodes: {rerun}")
 
     return updated

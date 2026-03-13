@@ -16,6 +16,7 @@ from core.state import ProfessorState
 logger = logging.getLogger(__name__)
 
 PATTERNS_COLLECTION = "professor_patterns_v2"  # v2 — do NOT touch v1
+CRITIC_FAILURE_COLLECTION = "critic_failure_patterns"  # Day 11
 
 
 def build_competition_fingerprint(state: ProfessorState) -> dict:
@@ -243,3 +244,41 @@ def get_warm_start_priors(state: ProfessorState) -> list:
     priors.sort(key=lambda x: x["confidence"], reverse=True)
     logger.info(f"[MemorySchema] Warm-start priors: {len(priors)} approaches")
     return priors[:10]  # top 10 only
+
+
+def store_critic_failure_pattern(
+    fingerprint: dict,
+    missed_issue: str,
+    competition_name: str,
+) -> str:
+    """
+    Stores a critic failure pattern — an issue the critic failed to detect.
+    Written by post_mortem_agent when CV/LB gap indicates an undetected problem.
+    Returns the failure_id.
+    """
+    client     = build_chroma_client()
+    collection = get_or_create_collection(client, CRITIC_FAILURE_COLLECTION)
+
+    failure_id = str(uuid.uuid4())
+
+    document_text = (
+        fingerprint_to_text(fingerprint)
+        + f" Critic missed: {missed_issue}"
+    )
+
+    metadata = {
+        "failure_id":       failure_id,
+        "missed_issue":     missed_issue,
+        "competition":      competition_name,
+        "fingerprint_json": json.dumps(fingerprint),
+        "created_at":       datetime.now(timezone.utc).isoformat(),
+    }
+
+    collection.add(
+        documents=[document_text],
+        metadatas=[metadata],
+        ids=[failure_id],
+    )
+    logger.info(f"[MemorySchema] Critic failure pattern stored: {failure_id} for {competition_name}")
+    return failure_id
+

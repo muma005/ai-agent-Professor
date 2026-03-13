@@ -1,6 +1,9 @@
 # agents/ml_optimizer.py
 
 import os
+import gc
+import psutil
+import optuna
 import json
 import pickle
 import numpy as np
@@ -69,6 +72,95 @@ def _prepare_features(df: pl.DataFrame, target_col: str, schema: dict) -> tuple:
     return X, y, feature_cols
 
 
+def _objective(trial: optuna.Trial, X, y, cv_folds, task_type, contract, max_memory_gb: float = 6.0) -> float:
+    models = []
+    oof_scores = []
+    
+    params = {
+        "n_estimators": trial.suggest_int("n_estimators", 100, 500),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+        "num_leaves": trial.suggest_int("num_leaves", 15, 63),
+        "random_state": 42,
+        "n_jobs": 1,
+        "verbose": -1,
+    }
+    
+    try:
+        for fold_idx, (train_idx, val_idx) in enumerate(cv_folds):
+            X_tr, X_val = X[train_idx], X[val_idx]
+            y_tr, y_val = y[train_idx], y[val_idx]
+            
+            if "classification" in task_type:
+                model = lgb.LGBMClassifier(**params)
+            else:
+                model = lgb.LGBMRegressor(**params)
+                
+            model.fit(
+                X_tr, y_tr,
+                eval_set=[(X_val, y_val)],
+                callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
+            )
+            
+            if contract.requires_proba:
+                val_preds = model.predict_proba(X_val)[:, 1]
+            else:
+                val_preds = model.predict(X_val)
+                
+            score = contract.scorer_fn(y_val, val_preds)
+            oof_scores.append(float(score))
+            models.append(model)
+            
+            # ── Memory check after each fold, not just after the trial ──
+            rss_gb = psutil.Process().memory_info().rss / 1e9
+            if rss_gb > max_memory_gb:
+                print(
+                    f"[ml_optimizer] Trial {trial.number} fold {fold_idx}: "
+                    f"RSS={rss_gb:.2f}GB exceeds limit {max_memory_gb}GB. "
+                    f"Pruning trial to prevent OOM."
+                )
+                trial.set_user_attr("oom_risk", True)
+                trial.set_user_attr("oom_at_fold", fold_idx)
+                trial.set_user_attr("oom_rss_gb", round(rss_gb, 2))
+                raise optuna.TrialPruned(f"Memory limit exceeded: {rss_gb:.2f}GB > {max_memory_gb}GB")
+        
+        return float(np.mean(oof_scores))
+    
+    finally:
+        # ── Always runs — whether trial completed, pruned, or raised ──
+        for model in models:
+            del model
+        del models
+        gc.collect()
+
+
+def run_optimization(X, y, cv_folds, task_type, contract, direction="maximize", n_trials=10, max_memory_gb=6.0, n_jobs=1) -> optuna.Study:
+    """
+    n_jobs=1 is the default and should not be overridden on 8GB RAM.
+    n_jobs=-1 means each worker holds its own model copy — instant OOM.
+    """
+    study = optuna.create_study(direction=direction)
+    
+    def memory_callback(study, trial):
+        rss_gb = psutil.Process().memory_info().rss / 1e9
+        if trial.state == optuna.trial.TrialState.PRUNED:
+            print(f"[ml_optimizer] Trial {trial.number} PRUNED (OOM). RSS={rss_gb:.2f}GB")
+        else:
+            print(f"[ml_optimizer] Trial {trial.number} complete. RSS={rss_gb:.2f}GB")
+    
+    from core.professor import _disable_langsmith_tracing
+    
+    with _disable_langsmith_tracing():
+        study.optimize(
+            lambda trial: _objective(trial, X, y, cv_folds, task_type, contract, max_memory_gb),
+            n_trials=n_trials,
+            n_jobs=n_jobs,          # never change this default on 8GB
+            callbacks=[memory_callback],
+            gc_after_trial=True,    # Optuna's own GC flag — belt AND braces
+        )
+    
+    return study
+
+
 @with_agent_retry("MLOptimizer")
 def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     """
@@ -131,62 +223,70 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     else:
         cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 
+    cv_folds = list(cv.split(X, y))
+    
+    # ── Day 12 Memory Overrides ──────────────────────────────────
+    MAX_MEMORY_GB = float(os.getenv("PROFESSOR_MAX_MEMORY_GB", "6.0"))
+    
+    # Check overrides from HITL
+    lgbm_override = state.get("lgbm_override", {})
+    if lgbm_override:
+        print(f"[MLOptimizer] Applied lgbm_override: {lgbm_override}")
+
+    print(f"[MLOptimizer] Running Optuna Optimization (Memory Limit: {MAX_MEMORY_GB}GB)...")
+    
+    study = run_optimization(
+        X, y, cv_folds, task_type, contract, 
+        direction=contract.direction, 
+        n_trials=20,  # Keeping low for stability in this phase
+        max_memory_gb=MAX_MEMORY_GB
+    )
+
+    peak_rss = max(
+        (t.user_attrs.get("oom_rss_gb", 0) for t in study.trials if t.user_attrs),
+        default=psutil.Process().memory_info().rss / 1e9
+    )
+    
+    memory_oom_risk = any(t.user_attrs.get("oom_risk") for t in study.trials)
+    optuna_pruned_trials = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.PRUNED)
+    
+    # Retrain best models on cv_folds to obtain fold models and OOF preds
+    best_params = study.best_params
+    best_params.update({"random_state": 42, "n_jobs": 1, "verbose": -1})
+    best_params.update(lgbm_override)
+
     fold_scores    = []
     oof_preds      = np.zeros(len(y))
     trained_models = []
 
-    print(f"[MLOptimizer] Running {n_folds}-fold CV...")
-
-    for fold, (train_idx, val_idx) in enumerate(cv.split(X, y), 1):
+    for fold_idx, (train_idx, val_idx) in enumerate(cv_folds):
         X_train, X_val = X[train_idx], X[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
 
-        # Build model — Phase 1: default params
         if "classification" in task_type:
-            model = LGBMClassifier(
-                n_estimators=500,
-                learning_rate=0.05,
-                num_leaves=31,
-                random_state=42,
-                verbose=-1,
-                n_jobs=-1
-            )
+            model = LGBMClassifier(**best_params)
         else:
-            model = LGBMRegressor(
-                n_estimators=500,
-                learning_rate=0.05,
-                num_leaves=31,
-                random_state=42,
-                verbose=-1,
-                n_jobs=-1
-            )
+            model = LGBMRegressor(**best_params)
 
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            callbacks=[
-                lgb.early_stopping(50, verbose=False),
-                lgb.log_evaluation(0)
-            ]
+            callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
         )
 
-        # Score this fold
         if contract.requires_proba:
             val_preds = model.predict_proba(X_val)[:, 1]
         else:
             val_preds = model.predict(X_val)
 
         oof_preds[val_idx] = val_preds
-
         fold_score = contract.scorer_fn(y_val, val_preds)
         fold_scores.append(float(fold_score))
         trained_models.append(model)
 
-        print(f"[MLOptimizer] Fold {fold}: {contract.scorer_name.upper()} = {fold_score:.4f}")
-
     cv_mean = float(np.mean(fold_scores))
     cv_std  = float(np.std(fold_scores))
-    print(f"[MLOptimizer] CV {contract.scorer_name.upper()}: {cv_mean:.4f} (+/- {cv_std:.4f})")
+    print(f"[MLOptimizer] Best Optuna {contract.scorer_name.upper()}: {cv_mean:.4f} (+/- {cv_std:.4f})")
 
     # ── Save best model ───────────────────────────────────────────
     if contract.direction == "maximize":
@@ -274,4 +374,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "metric_contract":      metrics,
         "oof_predictions_path": oof_path,
         "cost_tracker":         cost_tracker,
+        "memory_peak_gb":       round(peak_rss, 2),
+        "memory_oom_risk":      memory_oom_risk,
+        "optuna_pruned_trials": optuna_pruned_trials,
     }

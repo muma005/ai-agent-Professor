@@ -140,6 +140,28 @@ class ProfessorState(TypedDict):
     # ── Budget ────────────────────────────────────────────────────
     cost_tracker: CostTracker
 
+    # -- HITL Human Layer & Interventions (Day 12) -----------------
+    hitl_required: bool
+    hitl_prompt: dict
+    hitl_checkpoint_key: str
+    hitl_intervention_id: int
+    hitl_intervention_label: str
+    skip_data_validation: bool
+    null_threshold: float
+    impute_strategy: str
+    lgbm_override: dict
+    model_fallback: str
+    data_sample_fraction: float
+    api_timeout_multiplier: float
+    api_backoff_enabled: bool
+    llm_provider: str
+    debug_logging: bool
+
+    # -- Memory Monitoring (Day 12) --------------------------------
+    memory_peak_gb: float
+    memory_oom_risk: bool
+    optuna_pruned_trials: int
+
     # ── Output ────────────────────────────────────────────────────
     report_path: Optional[str]
     lineage_log_path: Optional[str]
@@ -243,4 +265,24 @@ def initial_state(
             "model_trials": {"status": "pending", "members": ["lgbm", "xgb", "catboost"]},
             "critic":       {"status": "pending", "members": ["vector_1", "vector_2", "vector_3", "vector_4"]},
         },
+        # -- HITL Human Layer & Interventions (Day 12) --
+        hitl_required=False,
+        hitl_prompt={},
+        hitl_checkpoint_key="",
+        hitl_intervention_id=0,
+        hitl_intervention_label="",
+        skip_data_validation=False,
+        null_threshold=1.0,
+        impute_strategy="default",
+        lgbm_override={},
+        model_fallback="",
+        data_sample_fraction=1.0,
+        api_timeout_multiplier=1.0,
+        api_backoff_enabled=False,
+        llm_provider="groq",
+        debug_logging=False,
+        # -- Memory Monitoring (Day 12) --
+        memory_peak_gb=0.0,
+        memory_oom_risk=False,
+        optuna_pruned_trials=0,
     )

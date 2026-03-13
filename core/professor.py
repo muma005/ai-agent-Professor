@@ -10,7 +10,11 @@ if _tracing_enabled:
     print(f"[Professor] LangSmith tracing ON -- project: "
           f"{os.getenv('LANGCHAIN_PROJECT', 'default')}")
 
+# Day 12: Default tracing sampling rate to 10% to save costs
+os.environ.setdefault("LANGCHAIN_TRACING_SAMPLING_RATE", os.getenv("LANGCHAIN_TRACING_SAMPLING_RATE", "0.10"))
+
 import pickle
+import contextlib
 import numpy as np
 import polars as pl
 import polars.selectors as cs
@@ -425,11 +429,46 @@ def build_graph() -> StateGraph:
     return graph.compile()
 
 
+# ── Cost Management (Day 12) ──────────────────────────────────────
+
+@contextlib.contextmanager
+def _disable_langsmith_tracing():
+    """Temporarily disables LangSmith tracing. Restores original value on exit, even on exception."""
+    original = os.environ.get("LANGCHAIN_TRACING_V2", "false")
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    try:
+        yield
+    finally:
+        os.environ["LANGCHAIN_TRACING_V2"] = original
+
+
+def _log_estimated_cost(state: ProfessorState) -> None:
+    """
+    Rough cost estimate. Logged at end of each run.
+    Formula: outer_nodes * avg_tokens_per_node * cost_per_1k_tokens
+    """
+    OUTER_NODES = [
+        "semantic_router", "competition_intel", "data_engineer", "eda_agent",
+        "validation_architect", "feature_factory", "red_team_critic",
+        "ensemble_architect", "submission_strategist"
+    ]
+    AVG_TOKENS_PER_NODE = 3000
+    COST_PER_1K = 0.003  # claude-sonnet approximate
+
+    estimated_cost = len(OUTER_NODES) * AVG_TOKENS_PER_NODE * COST_PER_1K / 1000
+    print(
+        f"[Professor] Estimated LLM cost this run: ${estimated_cost:.4f} "
+        f"(outer pipeline only, Optuna tracing disabled). "
+        f"Adjust LANGCHAIN_TRACING_SAMPLING_RATE in .env to change trace coverage."
+    )
+
+
 # ── Convenience runner ────────────────────────────────────────────
 
 def run_professor(state: ProfessorState) -> ProfessorState:
     """Run the full Professor graph from an initial state."""
     graph  = build_graph()
     result = graph.invoke(state)
+    _log_estimated_cost(result)
     return result
 

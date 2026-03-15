@@ -70,6 +70,7 @@ class ProfessorState(TypedDict):
     # REPLACE: feature factory sets the full list each run
     feature_manifest: Annotated[Optional[list], _replace]
     feature_factory_checkpoint: Optional[dict]
+    feature_order: Annotated[Optional[list], _replace]   # exact column order at training time
 
     # ── Validation ────────────────────────────────────────────────
     cv_strategy: Optional[dict]
@@ -202,6 +203,7 @@ def initial_state(
         data_hash="",
         feature_manifest=None,
         feature_factory_checkpoint=None,
+        feature_order=[],
         cv_strategy=None,
         metric_contract=None,
         cv_scores=None,

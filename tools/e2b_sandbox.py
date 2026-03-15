@@ -2,13 +2,47 @@
 
 import os
 import sys
+import shutil
 import subprocess
 import tempfile
 import traceback
+import uuid
 import logging
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ── Day 15: Docker sandbox constants ──────────────────────────────
+MAX_OUTPUT_BYTES = 10 * 1024 * 1024   # 10 MB stdout cap
+DOCKER_IMAGE = "python:3.11-slim"
+MEMORY_LIMIT = "8g"
+CPU_LIMIT = "2"
+
+
+def _docker_available() -> bool:
+    """Returns True if Docker CLI is installed and daemon is running."""
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True, timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+_USE_DOCKER = (
+    _docker_available()
+    and os.getenv("PROFESSOR_USE_DOCKER_SANDBOX", "1") != "0"
+)
+if not _USE_DOCKER:
+    logger.warning(
+        "[sandbox] Docker not available — falling back to subprocess sandbox. "
+        "Install Docker Desktop for full isolation."
+    )
 
 # ── Polars preamble injected before every generated script ─────────
 SANDBOX_PREAMBLE = """\
@@ -81,12 +115,10 @@ def _validate_imports(code: str) -> Optional[str]:
 def _execute_once(code: str, session_id: str, timeout_seconds: int = 600,
                   extra_files: dict = None) -> dict:
     """
-    Single execution attempt via subprocess.
-    Returns: {success, stdout, stderr, result, timed_out, returncode}
+    Single execution attempt. Routes to Docker if available, else subprocess.
+    Returns: {success, stdout, stderr, result, timed_out, returncode, backend}
     """
-    full_code = SANDBOX_PREAMBLE + code
-
-    # Validate imports before running
+    # Validate imports before running (both backends)
     import_error = _validate_imports(code)
     if import_error:
         return {
@@ -97,7 +129,98 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600,
             "traceback": import_error,
             "timed_out": False,
             "returncode": 1,
+            "backend": "docker" if _USE_DOCKER else "subprocess",
         }
+
+    if _USE_DOCKER:
+        return _execute_docker(code, session_id, timeout_seconds, extra_files)
+    return _execute_subprocess(code, session_id, timeout_seconds, extra_files)
+
+
+def _execute_docker(code: str, session_id: str, timeout_seconds: int = 600,
+                    extra_files: dict = None) -> dict:
+    """Execute code inside a Docker container with full isolation."""
+    container_name = f"professor-sandbox-{uuid.uuid4().hex[:12]}"
+    full_code = SANDBOX_PREAMBLE + code
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        code_path = Path(tmpdir) / "code.py"
+        code_path.write_text(full_code, encoding="utf-8")
+
+        # Write extra files into tmpdir so they are available in the container
+        if extra_files:
+            for fname, content in extra_files.items():
+                (Path(tmpdir) / fname).write_text(content, encoding="utf-8")
+
+        cmd = [
+            "docker", "run",
+            "--rm",
+            "--name", container_name,
+            "--network", "none",
+            "--memory", MEMORY_LIMIT,
+            "--memory-swap", MEMORY_LIMIT,
+            "--cpus", CPU_LIMIT,
+            "--read-only",
+            "--tmpfs", "/tmp:rw,size=512m",
+            "--security-opt", "no-new-privileges",
+            "-v", f"{tmpdir}:/code:ro",
+            DOCKER_IMAGE,
+            "python", "/code/code.py",
+        ]
+
+        timed_out = False
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=timeout_seconds,
+                text=True,
+            )
+            stdout = result.stdout[:MAX_OUTPUT_BYTES]
+            stderr = result.stderr[:MAX_OUTPUT_BYTES]
+            returncode = result.returncode
+
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stdout = ""
+            stderr = f"Execution timed out after {timeout_seconds} seconds."
+            returncode = -1
+            _force_remove_container(container_name)
+
+        except Exception as e:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": f"Docker execution failed: {e}",
+                "returncode": -1,
+                "timed_out": False,
+                "backend": "docker",
+            }
+
+    return {
+        "success": returncode == 0,
+        "stdout": stdout,
+        "stderr": stderr,
+        "result": None,
+        "globals": {},
+        "timed_out": timed_out,
+        "returncode": returncode,
+        "backend": "docker",
+    }
+
+
+def _force_remove_container(name: str) -> None:
+    """Kills and removes a container by name. Silent on failure."""
+    try:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _execute_subprocess(code: str, session_id: str, timeout_seconds: int = 600,
+                        extra_files: dict = None) -> dict:
+    """Fallback: Day 9 subprocess sandbox."""
+    full_code = SANDBOX_PREAMBLE + code
 
     # Ensure output directory exists
     output_dir = f"outputs/{session_id}"
@@ -146,6 +269,7 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600,
             "globals": {},
             "timed_out": False,
             "returncode": result.returncode,
+            "backend": "subprocess",
         }
 
     except subprocess.TimeoutExpired as e:
@@ -161,6 +285,7 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600,
             "traceback": "Execution timeout",
             "timed_out": True,
             "returncode": -1,
+            "backend": "subprocess",
         }
 
     except Exception as e:
@@ -176,6 +301,7 @@ def _execute_once(code: str, session_id: str, timeout_seconds: int = 600,
             "traceback": traceback.format_exc(),
             "timed_out": False,
             "returncode": 1,
+            "backend": "subprocess",
         }
 
 

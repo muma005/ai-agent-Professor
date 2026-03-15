@@ -163,6 +163,10 @@ class ProfessorState(TypedDict):
     memory_oom_risk: bool
     optuna_pruned_trials: int
 
+    # -- External Data Scout (Day 15) ------------------------------
+    external_data_allowed: bool
+    external_data_manifest: dict
+
     # ── Output ────────────────────────────────────────────────────
     report_path: Optional[str]
     lineage_log_path: Optional[str]
@@ -287,4 +291,7 @@ def initial_state(
         memory_peak_gb=0.0,
         memory_oom_risk=False,
         optuna_pruned_trials=0,
+        # -- External Data Scout (Day 15) --
+        external_data_allowed=False,
+        external_data_manifest={},
     )

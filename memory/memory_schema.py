@@ -250,6 +250,10 @@ def store_critic_failure_pattern(
     fingerprint: dict,
     missed_issue: str,
     competition_name: str,
+    feature_flagged: str = "",
+    failure_mode: str = "",
+    cv_lb_gap: float = 0.0,
+    confidence: float = 0.5,
 ) -> str:
     """
     Stores a critic failure pattern — an issue the critic failed to detect.
@@ -270,7 +274,14 @@ def store_critic_failure_pattern(
         "failure_id":       failure_id,
         "missed_issue":     missed_issue,
         "competition":      competition_name,
+        "competition_name": competition_name,
         "fingerprint_json": json.dumps(fingerprint),
+        "fingerprint_text": fingerprint_to_text(fingerprint),
+        "feature_flagged":  feature_flagged,
+        "failure_mode":     failure_mode or missed_issue,
+        "cv_lb_gap":        str(cv_lb_gap),
+        "confidence":       str(confidence),
+        "stored_at":        datetime.now(timezone.utc).isoformat(),
         "created_at":       datetime.now(timezone.utc).isoformat(),
     }
 
@@ -281,4 +292,55 @@ def store_critic_failure_pattern(
     )
     logger.info(f"[MemorySchema] Critic failure pattern stored: {failure_id} for {competition_name}")
     return failure_id
+
+
+def query_critic_failure_patterns(
+    fingerprint: dict,
+    n_results: int = 5,
+    max_distance: float = 0.75,
+) -> list[dict]:
+    """
+    Queries the critic_failure_patterns ChromaDB collection.
+    Returns [] if collection doesn't exist or is empty.
+    Never raises.
+    """
+    try:
+        client = build_chroma_client()
+        ef = getattr(client, "_professor_ef", None)
+        try:
+            collection = client.get_collection(
+                name=CRITIC_FAILURE_COLLECTION,
+                embedding_function=ef,
+            )
+        except Exception:
+            return []   # collection doesn't exist yet — first competition
+
+        count = collection.count()
+        if count == 0:
+            return []
+
+        query_text = fingerprint_to_text(fingerprint)
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=min(n_results, count),
+            include=["documents", "metadatas", "distances"],
+        )
+
+        patterns = []
+        for doc, meta, dist in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
+            if dist > max_distance:
+                continue   # too dissimilar to be useful
+            patterns.append({**meta, "distance": dist, "document": doc})
+
+        # Sort by distance ascending — most similar first
+        patterns.sort(key=lambda p: p["distance"])
+        return patterns
+
+    except Exception as e:
+        logger.warning(f"[query_critic_failure_patterns] Failed: {e}")
+        return []
 

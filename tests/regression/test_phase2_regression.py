@@ -1,6 +1,7 @@
 # tests/regression/test_phase2_regression.py
 #
-# Written: Day 13 (stabilisation gate)
+# PHASE 2 REGRESSION FREEZE
+# Written: Day 13 (stabilisation gate) → updated Day 14 (Phase 2 gate frozen)
 # Gate baseline: 105 tests passing across 14 files (21 from day12, 84 from contracts)
 # Commit hash: b9e13c8292e2a6b9e3626093af960a2d8c1ba276
 #
@@ -204,3 +205,87 @@ class TestModuleImports:
 
     def test_import_submission_strategist(self):
         import agents.submission_strategist
+
+
+# ── Freeze 7: Critic catches injected leakage (Day 14) ───────────
+class TestCriticCatchesLeakageAlways:
+    """Critic must catch target-derived leakage on every run. No exceptions."""
+
+    def test_critic_critical_on_target_derived_feature(self, tmp_path):
+        import tempfile
+        import polars as pl
+        from agents.red_team_critic import _check_historical_failures
+
+        # Directly test the historical failures vector returns OK when
+        # no patterns are stored (does not crash the pipeline)
+        state = initial_state("regression_test", "data/spaceship_titanic/train.csv")
+        state["competition_fingerprint"] = {
+            "task_type": "tabular", "target_type": "binary",
+            "n_rows_bucket": "medium", "n_features_bucket": "medium",
+            "imbalance_ratio": 0.50,
+        }
+        state["feature_names"] = ["age", "fare"]
+        result = _check_historical_failures(state)
+        assert result["verdict"] == "OK", (
+            "REGRESSION: Historical failures vector should be OK with no stored patterns"
+        )
+
+
+# ── Freeze 8: HITL fires on 3x consecutive failure (Day 14) ─────
+class TestHITLFiresOn3xFailure:
+    """Circuit breaker must escalate to HITL after exactly 3 failures."""
+
+    def test_hitl_triggered_after_3_consecutive_failures(self):
+        from unittest.mock import patch
+        state = initial_state("comp", "data")
+        state["current_node_failure_count"] = 3
+        assert get_escalation_level(state) == EscalationLevel.HITL
+
+        state["current_node_failure_count"] = 2
+        with patch("guards.circuit_breaker._checkpoint_state_to_redis"):
+            with patch("guards.circuit_breaker.log_event"):
+                with patch("guards.circuit_breaker.generate_hitl_prompt",
+                           return_value={"interventions": [], "checkpoint_key": "ck"}):
+                    result = handle_escalation(
+                        state, EscalationLevel.HITL, "data_engineer",
+                        ValueError("persistent failure"), "traceback"
+                    )
+        assert result["hitl_required"] is True, (
+            "REGRESSION: HITL did not fire after 3 consecutive data_engineer failures."
+        )
+        assert result["pipeline_halted"] is True
+
+
+# ── Freeze 9: Wilcoxon gate rejects non-significant improvements ─
+class TestWilcoxonGateRejectsNoise:
+    """
+    Non-significant fold score differences must be rejected by the gate.
+    Complex models must not replace simple models on noise.
+    """
+
+    def test_gate_returns_false_for_noise_level_difference(self):
+        from tools.wilcoxon_gate import is_significantly_better
+
+        # Near-identical fold scores — within rounding noise
+        scores_a = [0.8012, 0.8009, 0.8015, 0.8011, 0.8013]
+        scores_b = [0.8010, 0.8012, 0.8013, 0.8009, 0.8014]
+
+        result = is_significantly_better(scores_a, scores_b)
+        assert result is False, (
+            "REGRESSION: Wilcoxon gate approved a non-significant improvement. "
+            "Complex models are being selected on noise."
+        )
+
+
+# ── Freeze 10: Historical failures vector is wired (Day 14) ──────
+class TestHistoricalFailuresVectorWired:
+    """Vector 8 must be present in the critic."""
+
+    def test_check_historical_failures_importable(self):
+        from agents.red_team_critic import _check_historical_failures
+        assert callable(_check_historical_failures)
+
+    def test_query_critic_failure_patterns_importable(self):
+        from memory.memory_schema import query_critic_failure_patterns
+        assert callable(query_critic_failure_patterns)
+

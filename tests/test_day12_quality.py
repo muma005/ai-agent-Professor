@@ -249,19 +249,19 @@ class TestHITLFullIntegration:
         with patch("guards.circuit_breaker._checkpoint_state_to_redis"):
             with patch("guards.circuit_breaker.log_event"):
                 # We need to give hitl required some output
-                with patch("guards.circuit_breaker.generate_hitl_prompt", return_value={"interventions": []}):
-                    result = handle_escalation(state, "data_engineer", KeyError("Missing target"), "traceback", EscalationLevel.HITL)
+                with patch("guards.circuit_breaker.generate_hitl_prompt", return_value={"interventions": [], "checkpoint_key": "test_ckpt"}):
+                    result = handle_escalation(state, EscalationLevel.HITL, "data_engineer", KeyError("Missing target"), "traceback")
                     assert result["hitl_required"] is True
                     
     def test_hitl_does_not_trigger_on_first_two_failures(self):
         state = initial_state("comp", "data")
         state["current_node_failure_count"] = 0 # next is 1st (MICRO)
         with patch("guards.circuit_breaker.log_event"):
-            result = handle_escalation(state, "data_engineer", Exception("err"), "traceback", EscalationLevel.MICRO)
+            result = handle_escalation(state, EscalationLevel.MICRO, "data_engineer", Exception("err"), "traceback")
             assert state.get("hitl_required") is not True
             
             state["current_node_failure_count"] = 1 # next is 2nd (MACRO)
-            result = handle_escalation(state, "data_engineer", Exception("err"), "traceback", EscalationLevel.MACRO)
+            result = handle_escalation(state, EscalationLevel.MACRO, "data_engineer", Exception("err"), "traceback")
             assert state.get("hitl_required") is not True
 
     def test_resume_with_auto_intervention_applies_state_change(self):

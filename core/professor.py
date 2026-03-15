@@ -27,6 +27,7 @@ from agents.eda_agent import run_eda_agent
 from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 from agents.red_team_critic import run_red_team_critic
+from agents.feature_factory import run_feature_factory
 from agents.supervisor import run_supervisor_replan, get_replan_target, MAX_REPLAN_ATTEMPTS, NODE_PRIORITY
 
 
@@ -342,6 +343,7 @@ def build_graph() -> StateGraph:
     graph.add_node("validation_architect", run_validation_architect)
     graph.add_node("ml_optimizer",    run_ml_optimizer)
     graph.add_node("red_team_critic", run_red_team_critic)
+    graph.add_node("feature_factory", run_feature_factory)
     graph.add_node("supervisor_replan", run_supervisor_replan)
     graph.add_node("submit",          run_submit)
 
@@ -413,6 +415,9 @@ def build_graph() -> StateGraph:
             END:                 END,
         }
     )
+
+    # Feature factory stub → advance to ml_optimizer
+    graph.add_edge("feature_factory", "ml_optimizer")
 
     # Day 11: Supervisor replan → re-enter at earliest affected node
     graph.add_conditional_edges(

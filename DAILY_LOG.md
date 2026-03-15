@@ -2,6 +2,130 @@
 
 ---
 
+## Day 12 -- 2026-03-14 -- Podium-Level Hardening
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (252+ tests pass)
+
+**The ONE thing for today:**
+Complete HITL human layer, fix OOM in Optuna, and add cost control to LangSmith tracing.
+
+**Tasks completed:**
+- [x] guards/circuit_breaker.py -- HITL prompt generation with 5 error classes, 3 interventions per class, terminal banner
+- [x] guards/circuit_breaker.py -- resume_from_checkpoint() with AUTO/MANUAL intervention application
+- [x] agents/ml_optimizer.py -- per-fold memory check via psutil, TrialPruned on threshold, del models in finally, gc_after_trial, n_jobs=1
+- [x] core/professor.py -- LangSmith tracing disabled during Optuna loop, sampling rate from env var (default 0.10)
+- [x] Contract tests: test_hitl_prompt_contract.py, test_resume_checkpoint_contract.py (IMMUTABLE)
+
+**Bugs found and fixed:**
+- del models in try not finally -- never runs on exception
+- try/except not try/finally for tracing restore
+- env var restore setting "false" when key was absent
+- No error message truncation (50KB JSON per HITL event)
+- Per-fold memory check missing (OOM kills process at fold 5)
+- n_jobs=-1 causing 8x memory multiplier
+
+**Final commit hash:** b9e13c8
+
+---
+
+## Day 11 -- 2026-03-13 -- Learning Loop
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (186+ tests pass)
+
+**The ONE thing for today:**
+Add robustness vector, wire critic to supervisor auto-replan, build post-mortem agent.
+
+**Tasks completed:**
+- [x] agents/red_team_critic.py -- Vector 4 (robustness): noise injection, slice audit, OOF calibration (ECE + Brier)
+- [x] core/professor.py -- supervisor_replan node: CRITICAL -> auto-replan (drop features, rerun affected nodes, increment dag_version); max 3 replans before HITL
+- [x] agents/post_mortem_agent.py -- CV/LB gap root cause, feature retrospective, pattern extraction -> professor_patterns_v2 + critic_failure_patterns collections
+- [x] 66 new tests -- all green
+
+**Bugs found and fixed:**
+- CRITICAL verdict going straight to HITL when 80% are mechanically fixable (auto-replan handles them)
+- Critic self-improvement loop was missing (post-mortem now feeds back missed issues)
+
+**Final commit hash:** 3c267c6
+
+---
+
+## Day 10 -- 2026-03-12 -- Quality Conscience
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (110+ tests pass)
+
+**The ONE thing for today:**
+Redesign ChromaDB memory for transferable patterns, build 6-vector Red Team Critic.
+
+**Tasks completed:**
+- [x] memory/memory_schema.py -- competition fingerprints + NL embeddings for semantic retrieval; patterns replace raw hyperparams
+- [x] agents/red_team_critic.py -- 6 detection vectors: shuffled target, ID-only model, adversarial classifier, preprocessing audit, PR curve (imbalanced), temporal leakage
+- [x] Severity routing: CRITICAL -> hitl_required + replan_requested; HIGH/MEDIUM -> log + continue
+- [x] Contract test: test_critic_contract.py (IMMUTABLE)
+- [x] 53 adversarial quality tests -- all green
+
+**Bugs found and fixed:**
+- Hyperparams don't transfer between competitions (patterns do)
+- Preprocessing leakage regex false positives on sklearn Pipeline objects
+
+**Final commit hash:** 610b7af
+
+---
+
+## Day 9 -- 2026-03-11 -- Resilience Layer
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (66 tests pass)
+
+**The ONE thing for today:**
+Build circuit breaker, subprocess sandbox, service health fallbacks, and inner retry loops.
+
+**Tasks completed:**
+- [x] guards/circuit_breaker.py -- 4-level escalation: MICRO -> MACRO -> HITL -> TRIAGE
+- [x] tools/e2b_sandbox.py -- replaced RestrictedPython with subprocess sandbox (supports numpy, polars, LightGBM)
+- [x] guards/service_health.py -- Groq->Gemini fallback, exponential backoff, ChromaDB/Redis graceful degradation
+- [x] agents/agent_retry.py -- inner retry loop (3 attempts + error context fed back to LLM) for all 8 LLM-calling agents
+- [x] core/professor.py -- parallel execution groups (intelligence fan-out, model trial fan-out, critic fan-out)
+- [x] 54 adversarial resilience tests -- 52 pass, 2 skip (Docker Redis not running)
+
+**Bugs found and fixed:**
+- RestrictedPython blocks numpy/LightGBM C-extensions (switched to subprocess sandbox)
+- Redis silent fallback to fakeredis losing state on restart
+
+**Final commit hash:** 010371d
+
+---
+
+## Day 8 -- 2026-03-10 -- Phase 2 Kickoff
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (58/58 contract tests pass)
+
+**The ONE thing for today:**
+Build intelligence and quality agents: Validation Architect, EDA Agent, Competition Intel.
+
+**Tasks completed:**
+- [x] core/state.py -- Phase 2 fields: task_type, data_hash (SHA-256[:16]), competition_context
+- [x] agents/validation_architect.py -- deterministic CV strategy (StratifiedKFold / GroupKFold / TimeSeriesSplit / KFold) + CV/LB mismatch detection
+- [x] agents/eda_agent.py -- outlier profiling, leakage fingerprinting, duplicate/ID-conflict detection
+- [x] agents/competition_intel.py -- GM-CAP 1 forum scraper upgrade
+- [x] Fixed ChromaDB silent fallback to random embeddings (validated bge-small-en-v1.5, 384-dim)
+- [x] 57 new tests -- all green (66 total after merge)
+
+**Bugs found and fixed:**
+- ChromaDB silently using random embeddings when model load fails -- invisible corruption of all memory queries
+
+**Final commit hash:** c95ecc5
+
+---
+
 ## Day 7 -- 2026-03-07 -- PHASE 1 GATE
 
 **Schedule status:** ON TRACK

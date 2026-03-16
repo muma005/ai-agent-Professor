@@ -2,6 +2,38 @@
 
 ---
 
+## Day 16 -- 2026-03-16 -- Diversity Ensemble + Feature Factory Foundation
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Diversity-first ensemble selection + feature factory Rounds 1 & 2 with contract test.
+
+**Tasks completed:**
+- [x] agents/ensemble_architect.py -- `select_diverse_ensemble()`: greedy diversity-weighted model selection. Rejects correlation > 0.97, flags prize candidates (correlation < 0.85 AND CV within 0.01 of best). Correlation matrix logged per run.
+- [x] agents/ensemble_architect.py -- `blend_models()` rewired: calls `select_diverse_ensemble()` instead of naive top-N. Data hash validation (Day 13) still runs first. Model registry switched from list to dict.
+- [x] agents/ensemble_architect.py -- `_validate_oof_present()` guard raises `ValueError` if any model missing OOF predictions.
+- [x] agents/feature_factory.py -- Round 1: `_generate_round1_features()` — log1p, sqrt, missingness flags from schema.json only. `_apply_round1_transforms()` with Polars.
+- [x] agents/feature_factory.py -- Round 2: `_generate_round2_features()` — domain features from competition_brief.json via LLM. Source column validation against schema. Capped at 15.
+- [x] agents/feature_factory.py -- `run_feature_factory()` main node: reads schema.json + competition_brief.json, generates candidates, writes feature_manifest.json. Day 16 stub: all verdicts = KEEP (Day 17 adds Wilcoxon + null importance filtering).
+- [x] core/state.py -- new fields: `ensemble_selection`, `selected_models`, `ensemble_oof`, `prize_candidates`, `feature_candidates`, `round1_features`, `round2_features`. `feature_manifest` type changed from list to dict.
+- [x] tests/contracts/test_feature_factory_contract.py -- 9 immutable contract tests (IMMUTABLE)
+
+**Bugs avoided (from spec):**
+1. Correlation computed against ensemble OOF mean, not just anchor (evolves as models are added)
+2. Prize candidate check uses AND (not OR) — both low correlation AND competitive CV required
+3. Correlation rejection threshold uses strict `>` (not `>=`) — models at exactly 0.97 are evaluated
+4. log1p uses natural log (base e via Polars), not log2 or log10
+5. Round 2 validates source_columns against schema before adding candidate (not at transform time)
+
+**Test results:** 46 quality + 9 contract = 55 tests, all passed. 44 existing contract tests still green.
+
+**Commit hash:** e4c6ccd
+
+---
+
 ## Day 15 -- 2026-03-15 -- Phase 2 Finale: Infrastructure for Phase 3
 
 **Schedule status:** ON TRACK

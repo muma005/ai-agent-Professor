@@ -66,9 +66,12 @@ class ProfessorState(TypedDict):
     schema_path: Optional[str]
     data_hash: str     # SHA-256 of source file, first 16 chars
 
-    # ── Feature Engineering ───────────────────────────────────────
-    # REPLACE: feature factory sets the full list each run
-    feature_manifest: Annotated[Optional[list], _replace]
+    # ── Feature Engineering (Day 16: feature factory) ─────────────
+    # REPLACE: feature factory sets the full manifest each run
+    feature_manifest: Annotated[Optional[dict], _replace]
+    feature_candidates: Annotated[Optional[list], _replace]  # names of kept features
+    round1_features: Annotated[Optional[list], _replace]     # Round 1 generic feature names
+    round2_features: Annotated[Optional[list], _replace]     # Round 2 domain feature names
     feature_factory_checkpoint: Optional[dict]
     feature_order: Annotated[Optional[list], _replace]   # exact column order at training time
 
@@ -106,8 +109,12 @@ class ProfessorState(TypedDict):
     cv_lb_gap: Optional[float]
     gap_root_cause: str
 
-    # ── Ensemble ──────────────────────────────────────────────────
+    # ── Ensemble (Day 16: diversity selection) ────────────────────
+    ensemble_selection: Optional[dict]         # full result from select_diverse_ensemble()
+    selected_models: Annotated[Optional[list], _replace]  # names of selected models
     ensemble_weights: Optional[dict]
+    ensemble_oof: Annotated[Optional[list], _replace]     # blended OOF predictions
+    prize_candidates: Annotated[Optional[list], _replace] # low-corr + competitive CV
     oof_predictions_path: Optional[str]
     test_predictions_path: Optional[str]
 
@@ -206,6 +213,9 @@ def initial_state(
         schema_path=None,
         data_hash="",
         feature_manifest=None,
+        feature_candidates=None,
+        round1_features=None,
+        round2_features=None,
         feature_factory_checkpoint=None,
         feature_order=[],
         cv_strategy=None,
@@ -232,7 +242,11 @@ def initial_state(
         lb_rank=None,
         cv_lb_gap=None,
         gap_root_cause="",
+        ensemble_selection=None,
+        selected_models=None,
         ensemble_weights=None,
+        ensemble_oof=None,
+        prize_candidates=None,
         oof_predictions_path=None,
         test_predictions_path=None,
         submission_path=None,

@@ -2,6 +2,210 @@
 
 ---
 
+## Day 15 -- 2026-03-15 -- Phase 2 Finale: Infrastructure for Phase 3
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Lock graph compilation, add Docker sandbox, LangFuse observability, and external data scout. Close Phase 2.
+
+**Tasks completed:**
+- [x] core/professor.py -- graph singleton with thread-safe double-checked locking (`get_graph()`, `get_graph_cache_clear()`)
+- [x] tools/e2b_sandbox.py -- Docker container sandbox (`python:3.11-slim`, `--network none`, `--read-only`, memory/CPU limits), subprocess fallback when Docker unavailable
+- [x] core/professor.py -- LangFuse observability integration (graceful degradation if keys absent, JSONL lineage coexists)
+- [x] agents/competition_intel.py -- external data scout (`run_external_data_scout()`), gated by `state["external_data_allowed"]`
+- [x] core/state.py -- new fields: `external_data_allowed`, `external_data_manifest`
+- [x] conftest.py -- `reset_graph_singleton` autouse fixture to prevent cross-test pollution
+- [x] Contract test: test_competition_intel_contract.py (IMMUTABLE)
+
+**Bugs found and fixed:**
+- Graph recompilation on every `run_professor()` call -- 2-4s overhead per invocation, compounds in retry loops
+- `conftest.py` needed graph singleton reset to prevent test cross-contamination
+
+**Known test issue (not yet fixed):**
+- `test_day15_quality.py::TestExternalDataScout::test_data_engineer_logs_high_relevance_sources` -- FAILS with `AttributeError: <module 'agents.data_engineer'> does not have the attribute 'log_event'`. The test patches `agents.data_engineer.log_event` but `data_engineer.py` does not import `log_event` at module level. Mock target mismatch.
+
+**Test results:** 45 passed, 1 failed, 1 skipped, 1 deselected (46 warnings -- google.generativeai deprecation)
+
+**Final commit hash:** 688c6d8
+
+---
+
+## Day 14 -- 2026-03-15 -- Compounding Advantage + Phase 2 Gate
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Add historical failure pattern vector to critic, run Phase 2 gate, freeze regression test.
+
+**Tasks completed:**
+- [x] agents/red_team_critic.py -- Vector 8 (`historical_failures`): queries `critic_failure_patterns` ChromaDB collection for structurally similar past competitions, flags features matching known failure modes with confidence-based severity
+- [x] memory/memory_schema.py -- `query_critic_failure_patterns()` function for semantic retrieval from ChromaDB
+- [x] tests/phase2_gate.py -- Phase 2 gate with 3 conditions (critic catches injected leakage, validation architect blocks wrong metric, CV beats Phase 1 baseline)
+- [x] tests/regression/test_phase2_regression.py -- FROZEN, IMMUTABLE
+
+**Bugs found and fixed:**
+- Flaky ChromaDB round-trip test -- query was limited to top-20 results when collection had fewer entries, fixed by querying full collection
+
+**Final commit hash:** 57294eb
+
+---
+
+## Day 13 -- 2026-03-15 -- Submission Integrity
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Fix silent submission bugs: train/test column misalignment, stale data hash in ensemble, and add Wilcoxon significance gate.
+
+**Tasks completed:**
+- [x] agents/ml_optimizer.py -- save `feature_order` (exact column list) to `metrics.json` after training
+- [x] tools/submit_tools.py -- enforce `feature_order` at prediction time, raise on mismatch (not silent wrong prediction)
+- [x] agents/ensemble_architect.py -- `data_hash` validation before blend, filters out models trained on stale data versions
+- [x] tools/wilcoxon_gate.py -- Wilcoxon signed-rank test for statistically rigorous model comparison (p < 0.05)
+- [x] agents/ml_optimizer.py -- Wilcoxon gate plugged into model selection (fold scores stored per Optuna trial)
+- [x] core/professor.py -- graph wiring stabilisation fix (routing map)
+- [x] 55 quality tests -- all green
+
+**Bugs found and fixed:**
+- Train/test column misalignment: Polars reads CSVs with different internal ordering, LightGBM silently uses wrong features (shapes match but semantics wrong)
+- Ensemble blending models trained on different data versions (Kaggle mid-competition data corrections)
+- Graph wiring: routing map KeyError on conditional edges (stabilisation gate fix)
+
+**Final commit hash:** a42a938
+
+---
+
+## Day 12 -- 2026-03-14 -- Podium-Level Hardening
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (252+ tests pass)
+
+**The ONE thing for today:**
+Complete HITL human layer, fix OOM in Optuna, and add cost control to LangSmith tracing.
+
+**Tasks completed:**
+- [x] guards/circuit_breaker.py -- HITL prompt generation with 5 error classes, 3 interventions per class, terminal banner
+- [x] guards/circuit_breaker.py -- resume_from_checkpoint() with AUTO/MANUAL intervention application
+- [x] agents/ml_optimizer.py -- per-fold memory check via psutil, TrialPruned on threshold, del models in finally, gc_after_trial, n_jobs=1
+- [x] core/professor.py -- LangSmith tracing disabled during Optuna loop, sampling rate from env var (default 0.10)
+- [x] Contract tests: test_hitl_prompt_contract.py, test_resume_checkpoint_contract.py (IMMUTABLE)
+
+**Bugs found and fixed:**
+- del models in try not finally -- never runs on exception
+- try/except not try/finally for tracing restore
+- env var restore setting "false" when key was absent
+- No error message truncation (50KB JSON per HITL event)
+- Per-fold memory check missing (OOM kills process at fold 5)
+- n_jobs=-1 causing 8x memory multiplier
+
+**Final commit hash:** b9e13c8
+
+---
+
+## Day 11 -- 2026-03-13 -- Learning Loop
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (186+ tests pass)
+
+**The ONE thing for today:**
+Add robustness vector, wire critic to supervisor auto-replan, build post-mortem agent.
+
+**Tasks completed:**
+- [x] agents/red_team_critic.py -- Vector 4 (robustness): noise injection, slice audit, OOF calibration (ECE + Brier)
+- [x] core/professor.py -- supervisor_replan node: CRITICAL -> auto-replan (drop features, rerun affected nodes, increment dag_version); max 3 replans before HITL
+- [x] agents/post_mortem_agent.py -- CV/LB gap root cause, feature retrospective, pattern extraction -> professor_patterns_v2 + critic_failure_patterns collections
+- [x] 66 new tests -- all green
+
+**Bugs found and fixed:**
+- CRITICAL verdict going straight to HITL when 80% are mechanically fixable (auto-replan handles them)
+- Critic self-improvement loop was missing (post-mortem now feeds back missed issues)
+
+**Final commit hash:** 3c267c6
+
+---
+
+## Day 10 -- 2026-03-12 -- Quality Conscience
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (110+ tests pass)
+
+**The ONE thing for today:**
+Redesign ChromaDB memory for transferable patterns, build 6-vector Red Team Critic.
+
+**Tasks completed:**
+- [x] memory/memory_schema.py -- competition fingerprints + NL embeddings for semantic retrieval; patterns replace raw hyperparams
+- [x] agents/red_team_critic.py -- 6 detection vectors: shuffled target, ID-only model, adversarial classifier, preprocessing audit, PR curve (imbalanced), temporal leakage
+- [x] Severity routing: CRITICAL -> hitl_required + replan_requested; HIGH/MEDIUM -> log + continue
+- [x] Contract test: test_critic_contract.py (IMMUTABLE)
+- [x] 53 adversarial quality tests -- all green
+
+**Bugs found and fixed:**
+- Hyperparams don't transfer between competitions (patterns do)
+- Preprocessing leakage regex false positives on sklearn Pipeline objects
+
+**Final commit hash:** 610b7af
+
+---
+
+## Day 9 -- 2026-03-11 -- Resilience Layer
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (66 tests pass)
+
+**The ONE thing for today:**
+Build circuit breaker, subprocess sandbox, service health fallbacks, and inner retry loops.
+
+**Tasks completed:**
+- [x] guards/circuit_breaker.py -- 4-level escalation: MICRO -> MACRO -> HITL -> TRIAGE
+- [x] tools/e2b_sandbox.py -- replaced RestrictedPython with subprocess sandbox (supports numpy, polars, LightGBM)
+- [x] guards/service_health.py -- Groq->Gemini fallback, exponential backoff, ChromaDB/Redis graceful degradation
+- [x] agents/agent_retry.py -- inner retry loop (3 attempts + error context fed back to LLM) for all 8 LLM-calling agents
+- [x] core/professor.py -- parallel execution groups (intelligence fan-out, model trial fan-out, critic fan-out)
+- [x] 54 adversarial resilience tests -- 52 pass, 2 skip (Docker Redis not running)
+
+**Bugs found and fixed:**
+- RestrictedPython blocks numpy/LightGBM C-extensions (switched to subprocess sandbox)
+- Redis silent fallback to fakeredis losing state on restart
+
+**Final commit hash:** 010371d
+
+---
+
+## Day 8 -- 2026-03-10 -- Phase 2 Kickoff
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES (58/58 contract tests pass)
+
+**The ONE thing for today:**
+Build intelligence and quality agents: Validation Architect, EDA Agent, Competition Intel.
+
+**Tasks completed:**
+- [x] core/state.py -- Phase 2 fields: task_type, data_hash (SHA-256[:16]), competition_context
+- [x] agents/validation_architect.py -- deterministic CV strategy (StratifiedKFold / GroupKFold / TimeSeriesSplit / KFold) + CV/LB mismatch detection
+- [x] agents/eda_agent.py -- outlier profiling, leakage fingerprinting, duplicate/ID-conflict detection
+- [x] agents/competition_intel.py -- GM-CAP 1 forum scraper upgrade
+- [x] Fixed ChromaDB silent fallback to random embeddings (validated bge-small-en-v1.5, 384-dim)
+- [x] 57 new tests -- all green (66 total after merge)
+
+**Bugs found and fixed:**
+- ChromaDB silently using random embeddings when model load fails -- invisible corruption of all memory queries
+
+**Final commit hash:** c95ecc5
+
+---
+
 ## Day 7 -- 2026-03-07 -- PHASE 1 GATE
 
 **Schedule status:** ON TRACK

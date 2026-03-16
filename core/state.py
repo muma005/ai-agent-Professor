@@ -70,6 +70,7 @@ class ProfessorState(TypedDict):
     # REPLACE: feature factory sets the full list each run
     feature_manifest: Annotated[Optional[list], _replace]
     feature_factory_checkpoint: Optional[dict]
+    feature_order: Annotated[Optional[list], _replace]   # exact column order at training time
 
     # ── Validation ────────────────────────────────────────────────
     cv_strategy: Optional[dict]
@@ -162,6 +163,10 @@ class ProfessorState(TypedDict):
     memory_oom_risk: bool
     optuna_pruned_trials: int
 
+    # -- External Data Scout (Day 15) ------------------------------
+    external_data_allowed: bool
+    external_data_manifest: dict
+
     # ── Output ────────────────────────────────────────────────────
     report_path: Optional[str]
     lineage_log_path: Optional[str]
@@ -202,6 +207,7 @@ def initial_state(
         data_hash="",
         feature_manifest=None,
         feature_factory_checkpoint=None,
+        feature_order=[],
         cv_strategy=None,
         metric_contract=None,
         cv_scores=None,
@@ -285,4 +291,7 @@ def initial_state(
         memory_peak_gb=0.0,
         memory_oom_risk=False,
         optuna_pruned_trials=0,
+        # -- External Data Scout (Day 15) --
+        external_data_allowed=False,
+        external_data_manifest={},
     )

@@ -2,12 +2,50 @@
 
 import os
 import json
+import logging
 from datetime import datetime
 from core.state import ProfessorState
 from tools.e2b_sandbox import execute_code, SandboxExecutionError
 from tools.llm_client import call_llm
 from tools.data_tools import hash_dataset, ensure_session_dirs
 from guards.agent_retry import with_agent_retry
+
+logger = logging.getLogger(__name__)
+
+
+# ── Day 15: External data check ───────────────────────────────────
+def _check_external_data(state: ProfessorState) -> ProfessorState:
+    """
+    If external_data_manifest has recommended sources, log them for the engineer.
+    Does NOT auto-download — that requires explicit user confirmation.
+    Phase 3 enhancement: auto-pull low-risk sources (public embeddings, pip packages).
+    """
+    manifest = state.get("external_data_manifest", {})
+    recommended = manifest.get("recommended_sources", [])
+    sources = manifest.get("external_sources", [])
+
+    if not recommended:
+        return state
+
+    high_relevance = [s for s in sources if float(s.get("relevance_score", 0)) >= 0.8]
+
+    if high_relevance:
+        from core.lineage import log_event
+        logger.info(
+            f"[data_engineer] {len(high_relevance)} high-relevance external source(s) available. "
+            f"Review external_data_manifest.json. "
+            f"Auto-download not enabled in Phase 2 — add manually or wait for Phase 3."
+        )
+        log_event(
+            session_id=state["session_id"],
+            agent="data_engineer",
+            action="external_data_available",
+            keys_read=["external_data_manifest"],
+            keys_written=[],
+            values_changed={"sources": [s["name"] for s in high_relevance]},
+        )
+
+    return state
 
 
 # ── LLM fix callback for sandbox retry loop ───────────────────────

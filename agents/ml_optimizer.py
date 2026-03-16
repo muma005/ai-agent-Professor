@@ -2,6 +2,7 @@
 
 import os
 import gc
+import logging
 import psutil
 import optuna
 import json
@@ -12,12 +13,16 @@ from sklearn.model_selection import StratifiedKFold, KFold
 from lightgbm import LGBMClassifier, LGBMRegressor
 import lightgbm as lgb
 from core.state import ProfessorState
+from core.lineage import log_event
+from datetime import datetime
 from core.metric_contract import (
     MetricContract, default_contract,
     save_contract, load_contract, contract_to_prompt_snippet
 )
 from tools.data_tools import read_parquet, read_json
 from guards.agent_retry import with_agent_retry
+
+logger = logging.getLogger(__name__)
 
 
 def _identify_target_column(schema: dict, state: ProfessorState) -> str:
@@ -123,6 +128,8 @@ def _objective(trial: optuna.Trial, X, y, cv_folds, task_type, contract, max_mem
                 trial.set_user_attr("oom_rss_gb", round(rss_gb, 2))
                 raise optuna.TrialPruned(f"Memory limit exceeded: {rss_gb:.2f}GB > {max_memory_gb}GB")
         
+        trial.set_user_attr("fold_scores", [float(s) for s in oof_scores])
+        trial.set_user_attr("mean_cv", float(np.mean(oof_scores)))
         return float(np.mean(oof_scores))
     
     finally:
@@ -131,6 +138,133 @@ def _objective(trial: optuna.Trial, X, y, cv_folds, task_type, contract, max_mem
             del model
         del models
         gc.collect()
+
+
+def _select_best_trial_with_gate(
+    study: optuna.Study,
+    state: ProfessorState,
+    previous_best_scores: list[float] | None = None,
+) -> optuna.Trial | None:
+    """
+    Selects the best Optuna trial, but only accepts it over the previous best
+    if Wilcoxon confirms the improvement is significant.
+    Returns None if the candidate is not significantly better (caller keeps existing).
+    """
+    from tools.wilcoxon_gate import gate_result
+
+    candidate = study.best_trial
+    candidate_scores = candidate.user_attrs.get("fold_scores", [])
+
+    if not previous_best_scores or not candidate_scores:
+        logger.info(
+            "[ml_optimizer] No previous best or fold scores unavailable — "
+            "accepting study best trial without gate."
+        )
+        return candidate
+
+    result = gate_result(
+        fold_scores_a=candidate_scores,
+        fold_scores_b=previous_best_scores,
+        model_name_a=f"trial_{candidate.number}",
+        model_name_b="previous_best",
+    )
+
+    log_event(
+        session_id=state["session_id"],
+        agent="ml_optimizer",
+        action="wilcoxon_gate_decision",
+        keys_read=["model_registry"],
+        keys_written=[],
+        values_changed=result,
+    )
+
+    if result["gate_passed"]:
+        logger.info(
+            f"[ml_optimizer] Wilcoxon gate PASSED — "
+            f"accepting trial_{candidate.number} "
+            f"(delta={result['mean_delta']:+.5f}, p<0.05)"
+        )
+        return candidate
+    else:
+        logger.info(
+            f"[ml_optimizer] Wilcoxon gate FAILED — "
+            f"keeping previous best. "
+            f"trial_{candidate.number} not significantly better "
+            f"(delta={result['mean_delta']:+.5f})"
+        )
+        return None
+
+
+def _select_best_model_type(
+    model_results: dict[str, dict],
+    state: ProfessorState,
+) -> str:
+    """
+    Selects the best model type using pairwise Wilcoxon gates.
+    Returns the name of the significantly best model, or the simplest
+    model if no significant differences found.
+
+    Comparison order (complexity ascending): lgbm → xgb → catboost
+    A more complex model must beat the simpler one to be selected.
+    """
+    from tools.wilcoxon_gate import gate_result
+
+    MODEL_COMPLEXITY_ORDER = ["lgbm", "xgb", "catboost"]
+    available = [m for m in MODEL_COMPLEXITY_ORDER if m in model_results]
+
+    if not available:
+        raise ValueError("No model results to compare.")
+
+    champion = available[0]
+    champion_scores = model_results[champion].get("fold_scores", [])
+
+    for challenger in available[1:]:
+        challenger_scores = model_results[challenger].get("fold_scores", [])
+
+        if not champion_scores or not challenger_scores:
+            # Fall back to mean CV if fold scores not available
+            challenger_mean = model_results[challenger].get("cv_mean", 0)
+            champion_mean = model_results[champion].get("cv_mean", 0)
+            if challenger_mean > champion_mean:
+                logger.warning(
+                    f"[ml_optimizer] fold_scores unavailable — "
+                    f"falling back to mean CV. {challenger} ({challenger_mean:.5f}) > "
+                    f"{champion} ({champion_mean:.5f})"
+                )
+                champion = challenger
+                champion_scores = challenger_scores
+            continue
+
+        result = gate_result(
+            fold_scores_a=challenger_scores,
+            fold_scores_b=champion_scores,
+            model_name_a=challenger,
+            model_name_b=champion,
+        )
+
+        log_event(
+            session_id=state["session_id"],
+            agent="ml_optimizer",
+            action="wilcoxon_gate_decision",
+            keys_read=["model_registry"],
+            keys_written=[],
+            values_changed={**result, "comparison_type": "cross_model"},
+        )
+
+        if result["gate_passed"]:
+            champion = challenger
+            champion_scores = challenger_scores
+            logger.info(
+                f"[ml_optimizer] {challenger} significantly beats {result['model_name_b']} "
+                f"— new champion."
+            )
+        else:
+            logger.info(
+                f"[ml_optimizer] {challenger} does NOT significantly beat {champion} "
+                f"— keeping simpler model."
+            )
+
+    return champion
 
 
 def run_optimization(X, y, cv_folds, task_type, contract, direction="maximize", n_trials=10, max_memory_gb=6.0, n_jobs=1) -> optuna.Study:
@@ -305,6 +439,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     np.save(oof_path, oof_preds)
 
     # ── Save metrics.json ─────────────────────────────────────────
+    feature_order = list(feature_names)   # exact training column order
     metrics = {
         "scorer_name":    contract.scorer_name,
         "direction":      contract.direction,
@@ -315,8 +450,12 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "best_fold":      best_fold_idx + 1,
         "n_features":     len(feature_names),
         "feature_names":  feature_names,
+        "feature_order":  feature_order,
         "target_col":     target_col,
         "n_rows":         len(X),
+        "model_type":     "lightgbm_v0",
+        "trained_at":     datetime.utcnow().isoformat(),
+        "data_hash":      state.get("data_hash", ""),
     }
     metrics_path = f"{output_dir}/metrics.json"
     with open(metrics_path, "w") as f:
@@ -343,7 +482,6 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     print(f"[MLOptimizer] Complete.")
 
     # ── Log lineage ──────────────────────────────────────────────
-    from core.lineage import log_event
     log_event(
         session_id=session_id,
         agent="ml_optimizer",
@@ -370,6 +508,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         **state,
         "cv_scores":            fold_scores,
         "cv_mean":              cv_mean,
+        "feature_order":        feature_order,
         "model_registry":       existing_registry,
         "metric_contract":      metrics,
         "oof_predictions_path": oof_path,

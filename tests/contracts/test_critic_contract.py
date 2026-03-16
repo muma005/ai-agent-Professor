@@ -344,10 +344,13 @@ class TestCriticMemorySchemaIntegration:
         )
         assert pid is not None and len(pid) > 0
 
-        results = query_similar_competitions(fp, n_results=20)
+        # Use n_results=500 to cover entire collection — repeated test runs
+        # accumulate near-identical embeddings in persistent ChromaDB, so the
+        # just-stored pattern may not rank in the top-20 by cosine similarity.
+        results = query_similar_competitions(fp, n_results=500)
         assert len(results) >= 1, "Stored pattern must be retrievable"
         ids = [r["pattern_id"] for r in results]
-        assert pid in ids, f"Stored pattern {pid} not in top-20 query results: {ids}"
+        assert pid in ids, f"Stored pattern {pid} not in results: {ids}"
 
     def test_query_returns_empty_list_not_none_when_no_patterns(self):
         """query_similar_competitions must return [] not None when collection is empty."""

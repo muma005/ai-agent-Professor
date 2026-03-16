@@ -1,8 +1,10 @@
 # tools/submit_tools.py
 
 import os
+import json
 import polars as pl
 import numpy as np
+from pathlib import Path
 from datetime import datetime
 from tools.data_tools import read_csv
 
@@ -215,3 +217,45 @@ def save_submission_log(
           f"LB={lb_score if lb_score else 'pending'}")
 
     return log_path
+
+
+def build_submission(state: dict, test_df: "pl.DataFrame") -> "pl.DataFrame":
+    """
+    Builds submission DataFrame from test predictions.
+    Enforces feature_order from training — raises immediately on mismatch.
+
+    Loads feature_order from metrics.json (source of truth, not state).
+    """
+    # 1. Load feature_order from metrics.json (source of truth)
+    metrics_path = Path(f"outputs/{state['session_id']}/metrics.json")
+    if not metrics_path.exists():
+        raise FileNotFoundError(
+            f"metrics.json not found at {metrics_path}. "
+            "Cannot build submission without verified feature_order."
+        )
+
+    metrics = json.loads(metrics_path.read_text())
+    feature_order = metrics.get("feature_order")
+    if not feature_order:
+        raise ValueError(
+            "feature_order missing from metrics.json. "
+            "Re-run ml_optimizer to regenerate metrics with column order."
+        )
+
+    # 2. Enforce exact column order — raises ColumnNotFoundError if missing
+    try:
+        test_subset = test_df.select(feature_order)
+    except pl.exceptions.ColumnNotFoundError as e:
+        raise ValueError(
+            f"Test data is missing columns required by the trained model: {e}. "
+            "Check that test.csv matches the training feature set."
+        ) from e
+
+    # 3. Hard assertion — belt AND braces
+    assert list(test_subset.columns) == feature_order, (
+        f"Column order mismatch after .select(). "
+        f"Expected: {feature_order[:5]}... "
+        f"Got: {list(test_subset.columns)[:5]}..."
+    )
+
+    return test_subset

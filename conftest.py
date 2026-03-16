@@ -11,3 +11,12 @@ import fakeredis
 import memory.redis_state as _redis_state_module
 _redis_state_module._redis_client = fakeredis.FakeRedis(decode_responses=True)
 
+import pytest
+
+@pytest.fixture(autouse=True)
+def reset_graph_singleton():
+    """Ensures each test gets a fresh graph if it modifies graph structure."""
+    yield
+    from core.professor import get_graph_cache_clear
+    get_graph_cache_clear()
+

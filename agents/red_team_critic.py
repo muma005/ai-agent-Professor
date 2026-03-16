@@ -710,6 +710,139 @@ def _check_robustness(
 
 
 # =========================================================================
+# VECTOR 8 — Historical Failures (GM-CAP 4: compounding memory)
+# =========================================================================
+
+MIN_FEATURE_LEN_FOR_SUBSTRING = 4  # short names like "id" mustn't substring-match everything
+
+
+def _check_historical_failures(state: ProfessorState) -> dict:
+    """
+    Vector 8: Retrieves top-5 historical failure patterns similar to this
+    competition from the critic_failure_patterns ChromaDB collection. Flags
+    any patterns where the flagged feature or failure mode is present in the
+    current feature set.
+
+    Severity logic:
+        confidence >= 0.85 AND feature present  →  CRITICAL
+        confidence >= 0.70 AND feature present  →  HIGH
+        confidence >= 0.50 AND feature present  →  MEDIUM
+        no matches or collection empty          →  OK
+
+    Never raises — returns OK with diagnostic note on any failure.
+    """
+    from memory.memory_schema import query_critic_failure_patterns
+
+    fingerprint = state.get("competition_fingerprint", {})
+    feature_names = state.get("feature_names", [])
+
+    # 1. Query ChromaDB for similar failure patterns
+    try:
+        patterns = query_critic_failure_patterns(
+            fingerprint=fingerprint,
+            n_results=5,
+            max_distance=0.75,
+        )
+    except Exception as e:
+        return {
+            "verdict": "OK",
+            "note": f"ChromaDB query failed ({e}). Historical check skipped.",
+            "patterns_retrieved": 0,
+            "findings": [],
+        }
+
+    if not patterns:
+        return {
+            "verdict": "OK",
+            "note": "No similar historical failure patterns found in memory.",
+            "patterns_retrieved": 0,
+            "findings": [],
+        }
+
+    # 2. For each retrieved pattern, check if the failure mode is present now
+    findings = []
+    for pattern in patterns:
+        feature_flagged    = pattern.get("feature_flagged", "")
+        failure_mode       = pattern.get("failure_mode", "")
+        confidence         = float(pattern.get("confidence", 0.0))
+        cv_lb_gap          = float(pattern.get("cv_lb_gap", 0.0))
+        competition_source = pattern.get("competition_name", pattern.get("competition", "unknown"))
+        distance           = float(pattern.get("distance", 1.0))
+
+        if not feature_flagged:
+            continue  # no feature to match against
+
+        # Match: exact name OR substring (min length guard to prevent false positives)
+        # Short feature names (< 4 chars) require exact match only
+        if len(feature_flagged) < MIN_FEATURE_LEN_FOR_SUBSTRING:
+            feature_present = feature_flagged in feature_names
+        else:
+            feature_present = (
+                feature_flagged in feature_names
+                or any(feature_flagged in f for f in feature_names)
+                or any(f in feature_flagged for f in feature_names if len(f) >= MIN_FEATURE_LEN_FOR_SUBSTRING)
+            )
+
+        if not feature_present:
+            continue   # pattern doesn't apply to current feature set
+
+        # Determine severity
+        if confidence >= 0.85:
+            severity = "CRITICAL"
+        elif confidence >= 0.70:
+            severity = "HIGH"
+        elif confidence >= 0.50:
+            severity = "MEDIUM"
+        else:
+            continue   # too low confidence to flag
+
+        findings.append({
+            "severity":          severity,
+            "vector":            "historical_failures",
+            "feature_flagged":   feature_flagged,
+            "failure_mode":      failure_mode,
+            "confidence":        round(confidence, 3),
+            "cv_lb_gap_history": round(cv_lb_gap, 4),
+            "competition_source": competition_source,
+            "similarity_distance": round(distance, 3),
+            "evidence": (
+                f"In {competition_source} (similar competition profile, "
+                f"distance={distance:.2f}), {failure_mode} caused "
+                f"CV/LB gap={cv_lb_gap:.3f}. Confidence: {confidence:.2f}. "
+                f"Feature '{feature_flagged}' is present in current feature set."
+            ),
+            "action": f"Investigate '{feature_flagged}' for {failure_mode}.",
+            "replan_instructions": {
+                "remove_features":  [feature_flagged] if severity == "CRITICAL" else [],
+                "rerun_nodes":      ["feature_factory"] if severity == "CRITICAL" else [],
+            },
+        })
+
+    if not findings:
+        return {
+            "verdict": "OK",
+            "note": (
+                f"Retrieved {len(patterns)} historical patterns. "
+                f"None matched current feature set."
+            ),
+            "patterns_retrieved": len(patterns),
+            "findings": [],
+        }
+
+    overall_severity = max(
+        findings,
+        key=lambda f: _SEVERITY_ORDER.get(f["severity"], 0),
+    )["severity"]
+
+    return {
+        "verdict":           overall_severity,
+        "patterns_retrieved": len(patterns),
+        "patterns_matched":  len(findings),
+        "findings":          findings,
+    }
+
+
+# =========================================================================
 # ORCHESTRATOR
 # =========================================================================
 
@@ -826,6 +959,7 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
         eda_report=eda_report,
         model_registry=list(state.get("model_registry") or []),
     ))
+    _run_vector("historical_failures",  _check_historical_failures(state))
 
     # -- Compute overall severity ------------------------------------------------
     overall = _overall_severity(findings)

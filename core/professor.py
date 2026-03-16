@@ -15,9 +15,13 @@ os.environ.setdefault("LANGCHAIN_TRACING_SAMPLING_RATE", os.getenv("LANGCHAIN_TR
 
 import pickle
 import contextlib
+import logging
+import threading
 import numpy as np
 import polars as pl
 import polars.selectors as cs
+from typing import Optional
+from datetime import datetime, timezone
 from langgraph.graph import StateGraph, END
 from core.state import ProfessorState
 from agents.semantic_router import run_semantic_router
@@ -27,7 +31,10 @@ from agents.eda_agent import run_eda_agent
 from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 from agents.red_team_critic import run_red_team_critic
+from agents.feature_factory import run_feature_factory
 from agents.supervisor import run_supervisor_replan, get_replan_target, MAX_REPLAN_ATTEMPTS, NODE_PRIORITY
+
+logger = logging.getLogger(__name__)
 
 
 # ── Routing functions (conditional edges) ─────────────────────────
@@ -342,6 +349,7 @@ def build_graph() -> StateGraph:
     graph.add_node("validation_architect", run_validation_architect)
     graph.add_node("ml_optimizer",    run_ml_optimizer)
     graph.add_node("red_team_critic", run_red_team_critic)
+    graph.add_node("feature_factory", run_feature_factory)
     graph.add_node("supervisor_replan", run_supervisor_replan)
     graph.add_node("submit",          run_submit)
 
@@ -414,6 +422,9 @@ def build_graph() -> StateGraph:
         }
     )
 
+    # Feature factory stub → advance to ml_optimizer
+    graph.add_edge("feature_factory", "ml_optimizer")
+
     # Day 11: Supervisor replan → re-enter at earliest affected node
     graph.add_conditional_edges(
         "supervisor_replan",
@@ -427,6 +438,40 @@ def build_graph() -> StateGraph:
     graph.add_edge("submit", END)
 
     return graph.compile()
+
+
+# ── Day 15: Graph singleton ─────────────────────────────────────────
+
+_GRAPH = None
+_GRAPH_LOCK = threading.Lock()
+
+
+def get_graph():
+    """
+    Returns the compiled LangGraph graph, building it once per process.
+    Thread-safe via double-checked locking.
+    Resets on process restart (intended — code may have changed).
+    """
+    global _GRAPH
+    if _GRAPH is None:
+        with _GRAPH_LOCK:
+            if _GRAPH is None:
+                logger.info("[professor] Compiling LangGraph graph (first invocation)...")
+                _GRAPH = build_graph()
+                logger.info("[professor] Graph compiled and cached.")
+    return _GRAPH
+
+
+def get_graph_cache_clear() -> None:
+    """
+    Forces graph recompilation on next invocation.
+    Use in tests that modify the graph structure between runs.
+    Never call in production code.
+    """
+    global _GRAPH
+    with _GRAPH_LOCK:
+        _GRAPH = None
+    logger.debug("[professor] Graph cache cleared (testing only).")
 
 
 # ── Cost Management (Day 12) ──────────────────────────────────────
@@ -463,12 +508,107 @@ def _log_estimated_cost(state: ProfessorState) -> None:
     )
 
 
+# ── Day 15: LangFuse observability ─────────────────────────────────
+
+_LANGFUSE_CLIENT: Optional[object] = None
+_LANGFUSE_ENABLED = False
+
+
+def _init_langfuse() -> bool:
+    """
+    Initialises LangFuse client if keys are present.
+    Returns True if LangFuse is active, False if degraded to JSONL.
+    Never raises.
+    """
+    global _LANGFUSE_CLIENT
+    public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+    secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+    host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+    if not public_key or not secret_key:
+        logger.info(
+            "[observability] LangFuse keys not found. "
+            "Tracing disabled — using JSONL lineage only. "
+            "Add LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY to .env to enable."
+        )
+        return False
+
+    try:
+        from langfuse import Langfuse
+        _LANGFUSE_CLIENT = Langfuse(
+            public_key=public_key,
+            secret_key=secret_key,
+            host=host,
+        )
+        logger.info(f"[observability] LangFuse connected ({host}).")
+        return True
+    except Exception as e:
+        logger.warning(f"[observability] LangFuse init failed: {e}. Falling back to JSONL.")
+        _LANGFUSE_CLIENT = None
+        return False
+
+
+# Call once at module load:
+_LANGFUSE_ENABLED = _init_langfuse()
+
+
+@contextlib.contextmanager
+def _langfuse_trace(session_id: str, competition_name: str):
+    """
+    Context manager: wraps a full pipeline run in a LangFuse trace.
+    Yields a trace object (or None if LangFuse disabled).
+    """
+    if not _LANGFUSE_ENABLED or _LANGFUSE_CLIENT is None:
+        yield None
+        return
+
+    trace = _LANGFUSE_CLIENT.trace(
+        name="professor_pipeline_run",
+        session_id=session_id,
+        metadata={
+            "competition": competition_name,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    try:
+        yield trace
+    except Exception as e:
+        trace.update(status="ERROR", status_message=str(e)[:500])
+        raise
+    finally:
+        trace.update(metadata={"ended_at": datetime.now(timezone.utc).isoformat()})
+        _LANGFUSE_CLIENT.flush()
+
+
+def _trace_node(trace, node_name: str, input_summary: dict, output_summary: dict) -> None:
+    """
+    Records a single node execution as a LangFuse span.
+    No-op if trace is None (LangFuse disabled).
+    """
+    if trace is None:
+        return
+    try:
+        trace.span(
+            name=node_name,
+            input=input_summary,
+            output=output_summary,
+        )
+    except Exception:
+        pass  # never let tracing break the pipeline
+
+
 # ── Convenience runner ────────────────────────────────────────────
 
 def run_professor(state: ProfessorState) -> ProfessorState:
-    """Run the full Professor graph from an initial state."""
-    graph  = build_graph()
-    result = graph.invoke(state)
+    """Run the full Professor graph from an initial state. Uses cached graph."""
+    session_id = state.get("session_id", "unknown")
+    competition_name = state.get("competition_name", "unknown")
+
+    with _langfuse_trace(session_id, competition_name) as trace:
+        state = {**state, "_langfuse_trace": trace}
+        graph = get_graph()
+        result = graph.invoke(state)
+
     _log_estimated_cost(result)
     return result
 

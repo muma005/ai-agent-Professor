@@ -93,3 +93,66 @@ def gate_result(
             f"Difference not significant — keeping {model_name_b}"
         ),
     }
+
+
+# ── Day 17: Feature-level gate functions ─────────────────────────
+
+def is_feature_worth_adding(
+    baseline_fold_scores: list[float],
+    augmented_fold_scores: list[float],
+    feature_name: str = "candidate",
+    p_threshold: float = P_VALUE_THRESHOLD,
+) -> bool:
+    """
+    Returns True iff adding the candidate feature produces a statistically
+    significant improvement in CV fold scores (p < p_threshold, Wilcoxon).
+
+    Thin wrapper over is_significantly_better() with explicit naming
+    for the feature selection context.
+
+    Never raises. Conservative default (False) on any error.
+    """
+    result = is_significantly_better(
+        fold_scores_a=augmented_fold_scores,
+        fold_scores_b=baseline_fold_scores,
+        p_threshold=p_threshold,
+        alternative="greater",
+    )
+
+    try:
+        logger.info(
+            f"[WilcoxonGate] Feature '{feature_name}': "
+            f"{'KEEP' if result else 'DROP'} "
+            f"(baseline_mean={np.mean(baseline_fold_scores):.5f}, "
+            f"augmented_mean={np.mean(augmented_fold_scores):.5f}, "
+            f"delta={np.mean(augmented_fold_scores) - np.mean(baseline_fold_scores):+.5f})"
+        )
+    except Exception:
+        pass
+
+    return result
+
+
+def feature_gate_result(
+    baseline_fold_scores: list[float],
+    augmented_fold_scores: list[float],
+    feature_name: str,
+    p_threshold: float = P_VALUE_THRESHOLD,
+) -> dict:
+    """
+    Returns a structured gate result for lineage logging.
+    Extends gate_result() with feature-selection-specific fields.
+    """
+    base = gate_result(
+        fold_scores_a=augmented_fold_scores,
+        fold_scores_b=baseline_fold_scores,
+        model_name_a=f"{feature_name}_added",
+        model_name_b="baseline_without_feature",
+        p_threshold=p_threshold,
+    )
+    return {
+        **base,
+        "gate_type":    "feature_selection",
+        "feature_name": feature_name,
+        "decision":     "KEEP" if base["gate_passed"] else "DROP",
+    }

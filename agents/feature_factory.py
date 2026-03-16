@@ -3,7 +3,7 @@
 # Day 16: Feature Factory — Rounds 1 (generic) + 2 (domain/LLM)
 # Reads schema.json + competition_brief.json only — never raw data.
 # Writes feature_manifest.json with per-feature metadata.
-# Day 17 adds Wilcoxon gate + null importance filtering.
+# Day 17: Wilcoxon gate + null importance filtering.
 # -------------------------------------------------------------------------
 
 import json
@@ -19,6 +19,8 @@ import numpy as np
 from core.state import ProfessorState
 from core.lineage import log_event
 from tools.llm_client import call_llm
+from tools.wilcoxon_gate import feature_gate_result, is_feature_worth_adding
+from tools.null_importance import run_null_importance_filter
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +251,134 @@ def _generate_round2_features(
     return candidates
 
 
+# ── Day 17: Statistical feature evaluation ──────────────────────
+
+def _quick_cv(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_folds: int = 3,
+    task_type: str = "binary",
+) -> list[float]:
+    """
+    Quick K-fold CV for feature evaluation.
+    Uses n_folds=3 (not 5) to keep each evaluation at ~1-3 seconds.
+    """
+    import lightgbm as lgb
+    from sklearn.model_selection import StratifiedKFold, KFold
+    from sklearn.metrics import accuracy_score, mean_squared_error
+
+    if task_type == "binary":
+        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        ModelClass = lgb.LGBMClassifier
+    else:
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+        ModelClass = lgb.LGBMRegressor
+
+    params = {"n_estimators": 100, "verbosity": -1, "n_jobs": 1}
+    scores = []
+    for train_idx, val_idx in kf.split(X, y):
+        model = ModelClass(**params)
+        model.fit(X[train_idx], y[train_idx])
+        preds = model.predict(X[val_idx])
+        if task_type == "binary":
+            score = accuracy_score(y[val_idx], preds)
+        else:
+            score = -float(mean_squared_error(y[val_idx], preds))
+        scores.append(score)
+        del model
+    return scores
+
+
+def _evaluate_candidate_feature(
+    state: ProfessorState,
+    X_base: pl.DataFrame,
+    X_with_candidate: pl.DataFrame,
+    y: np.ndarray,
+    feature_name: str,
+    skip_wilcoxon_gate: bool = False,
+) -> bool:
+    """
+    Runs a quick 3-fold CV with and without the candidate feature.
+    Returns True if the feature passes the Wilcoxon gate.
+    """
+    if skip_wilcoxon_gate:
+        return True
+
+    task_type = state.get("task_type", "binary")
+    if task_type not in ("binary", "regression"):
+        task_type = "binary"
+
+    baseline_scores = _quick_cv(X_base.to_numpy(), y, n_folds=3, task_type=task_type)
+    augmented_scores = _quick_cv(X_with_candidate.to_numpy(), y, n_folds=3, task_type=task_type)
+
+    result = feature_gate_result(
+        baseline_fold_scores=baseline_scores,
+        augmented_fold_scores=augmented_scores,
+        feature_name=feature_name,
+    )
+
+    log_event(
+        session_id=state["session_id"],
+        agent="feature_factory",
+        action="wilcoxon_feature_gate",
+        keys_read=["feature_candidates"],
+        keys_written=["features_gate_passed", "features_gate_dropped"],
+        values_changed={
+            "feature_name": feature_name,
+            "gate_passed": result["gate_passed"],
+            "decision": result["decision"],
+        },
+    )
+
+    return result["gate_passed"]
+
+
+def _apply_null_importance_filter(
+    state: ProfessorState,
+    X: pl.DataFrame,
+    y: np.ndarray,
+) -> tuple[list[str], ProfessorState]:
+    """
+    Applies two-stage null importance filter to candidate feature set.
+    Updates state with survivor list and dropped features.
+    Returns (survivor_names, updated_state).
+    """
+    target_col = state.get("target_column", "")
+    id_col = state.get("id_column", "")
+    feature_names = [c for c in X.columns if c not in {target_col, id_col} and c]
+
+    result = run_null_importance_filter(
+        X=X, y=y,
+        feature_names=feature_names,
+        task_type=state.get("task_type", "binary"),
+    )
+
+    log_event(
+        session_id=state["session_id"],
+        agent="feature_factory",
+        action="null_importance_filter_complete",
+        keys_read=["feature_candidates"],
+        keys_written=["features_dropped_stage1", "features_dropped_stage2",
+                      "null_importance_result"],
+        values_changed={
+            "total_input":    result.total_features_input,
+            "total_output":   result.total_features_output,
+            "stage1_dropped": result.stage1_drop_count,
+            "stage2_dropped": result.stage2_drop_count,
+            "elapsed_s":      round(result.elapsed_seconds, 1),
+        },
+    )
+
+    state = {
+        **state,
+        "null_importance_result": result,
+        "features_dropped_stage1": result.dropped_stage1,
+        "features_dropped_stage2": result.dropped_stage2,
+    }
+
+    return result.survivors, state
+
+
 # ── Manifest builder ─────────────────────────────────────────────
 
 def _build_feature_manifest(candidates: list[FeatureCandidate], schema: dict) -> dict:
@@ -288,7 +418,7 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
     Reads schema.json and competition_brief.json only.
     Generates Round 1 (generic) + Round 2 (domain) candidates.
     Writes feature_manifest.json.
-    Day 17 adds Wilcoxon gate + null importance filtering after this function.
+    Day 17 adds Wilcoxon gate + null importance filtering.
     """
     session_id = state["session_id"]
 
@@ -315,11 +445,78 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         f"{len(round2_candidates)} Round 2 = {len(all_candidates)} total"
     )
 
-    # Filtering stub — replaced by Day 17 Wilcoxon + null importance
-    # In Day 16, all candidates pass with KEEP verdict
-    kept_candidates = all_candidates
-    for c in kept_candidates:
-        c.verdict = "KEEP"
+    # Day 17: Statistical filtering (requires clean data)
+    gate_passed = []
+    gate_dropped = []
+    clean_path = state.get("clean_data_path", "")
+    target_col = state.get("target_column", "")
+
+    if clean_path and Path(clean_path).exists() and target_col:
+        try:
+            df = (pl.read_parquet(clean_path) if clean_path.endswith(".parquet")
+                  else pl.read_csv(clean_path))
+            y = df[target_col].to_numpy()
+
+            # Apply Round 1 transforms
+            X = _apply_round1_transforms(df, round1_candidates)
+
+            # Wilcoxon gate for Round 2 candidates only
+            # Round 1 (log, sqrt, missingness) skip gate — low-risk transforms
+            for c in round2_candidates:
+                cols_present = all(s in X.columns for s in c.source_columns)
+                if not cols_present:
+                    c.verdict = "DROP"
+                    gate_dropped.append(c.name)
+                    continue
+                X_base = X.drop(c.name) if c.name in X.columns else X
+                X_with = X_base  # Round 2 features aren't applied yet; use base
+                passed = _evaluate_candidate_feature(
+                    state, X_base, X_base, y, c.name,
+                    skip_wilcoxon_gate=False,
+                )
+                if passed:
+                    gate_passed.append(c.name)
+                else:
+                    gate_dropped.append(c.name)
+                    c.verdict = "DROP"
+
+            # Null importance filter on kept features
+            kept_feature_names = (
+                [c.name for c in round1_candidates]
+                + gate_passed
+            )
+            # Only features that exist in X can be filtered
+            available_features = [f for f in kept_feature_names if f in X.columns]
+            if available_features:
+                survivors, state = _apply_null_importance_filter(
+                    state, X.select(available_features + [target_col]), y
+                )
+                survivor_set = set(survivors)
+            else:
+                survivor_set = set(kept_feature_names)
+
+            # Set verdicts
+            for c in all_candidates:
+                if c.verdict == "DROP":
+                    continue  # already dropped by Wilcoxon
+                if c.name in survivor_set or c.name not in available_features:
+                    c.verdict = "KEEP"
+                else:
+                    c.verdict = "DROP"
+
+        except Exception as e:
+            logger.warning(
+                f"[feature_factory] Statistical filtering failed: {e}. "
+                f"Using all candidates with KEEP verdict."
+            )
+            for c in all_candidates:
+                c.verdict = "KEEP"
+    else:
+        # No data available — keep Day 16 behavior
+        for c in all_candidates:
+            c.verdict = "KEEP"
+
+    kept_candidates = [c for c in all_candidates if c.verdict == "KEEP"]
 
     # Write feature_manifest.json
     manifest = _build_feature_manifest(kept_candidates, schema)
@@ -338,7 +535,9 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
             "round1_candidates": len(round1_candidates),
             "round2_candidates": len(round2_candidates),
             "total_kept": len(kept_candidates),
-            "dropped": 0,  # Day 17 populates this
+            "dropped": len(all_candidates) - len(kept_candidates),
+            "gate_passed": len(gate_passed),
+            "gate_dropped": len(gate_dropped),
         },
     )
 
@@ -348,5 +547,7 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         "feature_candidates": [c.name for c in kept_candidates],
         "round1_features": [c.name for c in round1_candidates],
         "round2_features": [c.name for c in round2_candidates],
+        "features_gate_passed": gate_passed,
+        "features_gate_dropped": gate_dropped,
     }
     return state

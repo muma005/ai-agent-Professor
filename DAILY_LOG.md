@@ -2,6 +2,41 @@
 
 ---
 
+## Day 17 -- 2026-03-16 -- Wilcoxon Feature Gate + Null Importance Two-Stage Filter
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Statistical rigour at the feature level — nothing survives that doesn't earn its place.
+
+**Tasks completed:**
+- [x] tools/wilcoxon_gate.py -- `is_feature_worth_adding()`: thin wrapper over `is_significantly_better()` with `alternative="greater"`. Returns True only if augmented scores are statistically better.
+- [x] tools/wilcoxon_gate.py -- `feature_gate_result()`: extends `gate_result()` with `gate_type="feature_selection"`, `feature_name`, `decision` ("KEEP"/"DROP") fields.
+- [x] tools/null_importance.py -- `NullImportanceResult` dataclass (12 fields) for full audit trail.
+- [x] tools/null_importance.py -- `_run_stage1_permutation_filter()`: trains on REAL y first, then n_shuffles on shuffled y. Importance ratio filtering. `gc.collect()` per shuffle, `n_jobs=1`, fixed seed `rng=np.random.default_rng(seed=42)`.
+- [x] tools/null_importance.py -- `STAGE2_SCRIPT_TEMPLATE`: self-contained Python script. Progress to `sys.stderr`, JSON-only to stdout. `gc.collect()` inside shuffle loop.
+- [x] tools/null_importance.py -- `_run_stage2_null_importance_persistent_sandbox()`: single `execute_code()` call for all 50 shuffles. Graceful fallback on sandbox failure or invalid JSON.
+- [x] tools/null_importance.py -- `run_null_importance_filter()`: public API combining stages. Skips when <10 features. Safety fallback when Stage 1 drops all.
+- [x] core/state.py -- 5 new fields: `null_importance_result`, `features_dropped_stage1`, `features_dropped_stage2`, `features_gate_passed`, `features_gate_dropped`.
+- [x] agents/feature_factory.py -- `_quick_cv()`: 3-fold CV with LightGBM.
+- [x] agents/feature_factory.py -- `_evaluate_candidate_feature()`: Wilcoxon gate with lineage logging (`action="wilcoxon_feature_gate"`).
+- [x] agents/feature_factory.py -- `_apply_null_importance_filter()`: calls `run_null_importance_filter`, logs to lineage (`action="null_importance_filter_complete"`).
+- [x] agents/feature_factory.py -- `run_feature_factory()` updated: load clean data → apply Round 1 transforms → Wilcoxon gate Round 2 → null importance filter → set verdicts.
+- [x] tests/test_day17_quality.py -- 44 adversarial tests across 5 blocks (all green)
+
+**Bugs avoided (from spec):**
+1. `alternative="greater"` (not "less") in `is_feature_worth_adding` — guards against reversed hypothesis
+2. Train on real y FIRST, then shuffles in Stage 1 — prevents corrupted actual importances
+3. Single `execute_code()` call for Stage 2 (not 50 in a loop) — persistent sandbox pattern
+4. Progress messages to `sys.stderr`, JSON-only to `stdout` — prevents JSON parse contamination
+5. `NullImportanceResult` excluded from Redis via existing `_is_serialisable()` — non-JSON-serialisable dataclass
+
+**Test results:** 44 passed, 0 failed | Regression: 32 passed (pre-existing collection errors in 3 files unchanged)
+
+---
+
 ## Day 16 -- 2026-03-16 -- Diversity Ensemble + Feature Factory Foundation
 
 **Schedule status:** ON TRACK

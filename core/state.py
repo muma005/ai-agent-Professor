@@ -170,6 +170,13 @@ class ProfessorState(TypedDict):
     memory_oom_risk: bool
     optuna_pruned_trials: int
 
+    # -- Feature Filtering (Day 17) ---------------------------------
+    null_importance_result: Optional[object]       # NullImportanceResult (not JSON-serialisable)
+    features_dropped_stage1: Annotated[Optional[list], _replace]
+    features_dropped_stage2: Annotated[Optional[list], _replace]
+    features_gate_passed: Annotated[Optional[list], _replace]
+    features_gate_dropped: Annotated[Optional[list], _replace]
+
     # -- External Data Scout (Day 15) ------------------------------
     external_data_allowed: bool
     external_data_manifest: dict
@@ -305,6 +312,12 @@ def initial_state(
         memory_peak_gb=0.0,
         memory_oom_risk=False,
         optuna_pruned_trials=0,
+        # -- Feature Filtering (Day 17) --
+        null_importance_result=None,
+        features_dropped_stage1=None,
+        features_dropped_stage2=None,
+        features_gate_passed=None,
+        features_gate_dropped=None,
         # -- External Data Scout (Day 15) --
         external_data_allowed=False,
         external_data_manifest={},

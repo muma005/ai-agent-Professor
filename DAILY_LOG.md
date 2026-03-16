@@ -2,6 +2,86 @@
 
 ---
 
+## Day 15 -- 2026-03-15 -- Phase 2 Finale: Infrastructure for Phase 3
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Lock graph compilation, add Docker sandbox, LangFuse observability, and external data scout. Close Phase 2.
+
+**Tasks completed:**
+- [x] core/professor.py -- graph singleton with thread-safe double-checked locking (`get_graph()`, `get_graph_cache_clear()`)
+- [x] tools/e2b_sandbox.py -- Docker container sandbox (`python:3.11-slim`, `--network none`, `--read-only`, memory/CPU limits), subprocess fallback when Docker unavailable
+- [x] core/professor.py -- LangFuse observability integration (graceful degradation if keys absent, JSONL lineage coexists)
+- [x] agents/competition_intel.py -- external data scout (`run_external_data_scout()`), gated by `state["external_data_allowed"]`
+- [x] core/state.py -- new fields: `external_data_allowed`, `external_data_manifest`
+- [x] conftest.py -- `reset_graph_singleton` autouse fixture to prevent cross-test pollution
+- [x] Contract test: test_competition_intel_contract.py (IMMUTABLE)
+
+**Bugs found and fixed:**
+- Graph recompilation on every `run_professor()` call -- 2-4s overhead per invocation, compounds in retry loops
+- `conftest.py` needed graph singleton reset to prevent test cross-contamination
+
+**Known test issue (not yet fixed):**
+- `test_day15_quality.py::TestExternalDataScout::test_data_engineer_logs_high_relevance_sources` -- FAILS with `AttributeError: <module 'agents.data_engineer'> does not have the attribute 'log_event'`. The test patches `agents.data_engineer.log_event` but `data_engineer.py` does not import `log_event` at module level. Mock target mismatch.
+
+**Test results:** 45 passed, 1 failed, 1 skipped, 1 deselected (46 warnings -- google.generativeai deprecation)
+
+**Final commit hash:** 688c6d8
+
+---
+
+## Day 14 -- 2026-03-15 -- Compounding Advantage + Phase 2 Gate
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Add historical failure pattern vector to critic, run Phase 2 gate, freeze regression test.
+
+**Tasks completed:**
+- [x] agents/red_team_critic.py -- Vector 8 (`historical_failures`): queries `critic_failure_patterns` ChromaDB collection for structurally similar past competitions, flags features matching known failure modes with confidence-based severity
+- [x] memory/memory_schema.py -- `query_critic_failure_patterns()` function for semantic retrieval from ChromaDB
+- [x] tests/phase2_gate.py -- Phase 2 gate with 3 conditions (critic catches injected leakage, validation architect blocks wrong metric, CV beats Phase 1 baseline)
+- [x] tests/regression/test_phase2_regression.py -- FROZEN, IMMUTABLE
+
+**Bugs found and fixed:**
+- Flaky ChromaDB round-trip test -- query was limited to top-20 results when collection had fewer entries, fixed by querying full collection
+
+**Final commit hash:** 57294eb
+
+---
+
+## Day 13 -- 2026-03-15 -- Submission Integrity
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Fix silent submission bugs: train/test column misalignment, stale data hash in ensemble, and add Wilcoxon significance gate.
+
+**Tasks completed:**
+- [x] agents/ml_optimizer.py -- save `feature_order` (exact column list) to `metrics.json` after training
+- [x] tools/submit_tools.py -- enforce `feature_order` at prediction time, raise on mismatch (not silent wrong prediction)
+- [x] agents/ensemble_architect.py -- `data_hash` validation before blend, filters out models trained on stale data versions
+- [x] tools/wilcoxon_gate.py -- Wilcoxon signed-rank test for statistically rigorous model comparison (p < 0.05)
+- [x] agents/ml_optimizer.py -- Wilcoxon gate plugged into model selection (fold scores stored per Optuna trial)
+- [x] core/professor.py -- graph wiring stabilisation fix (routing map)
+- [x] 55 quality tests -- all green
+
+**Bugs found and fixed:**
+- Train/test column misalignment: Polars reads CSVs with different internal ordering, LightGBM silently uses wrong features (shapes match but semantics wrong)
+- Ensemble blending models trained on different data versions (Kaggle mid-competition data corrections)
+- Graph wiring: routing map KeyError on conditional edges (stabilisation gate fix)
+
+**Final commit hash:** a42a938
+
+---
+
 ## Day 12 -- 2026-03-14 -- Podium-Level Hardening
 
 **Schedule status:** ON TRACK

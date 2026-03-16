@@ -282,15 +282,20 @@ class TestDataHashValidation:
     def teardown_method(self):
         _cleanup_outputs(self.session_id)
 
+    _oof_counter = 0
+
     def _make_registry(self, entries):
         """Create model_registry list from (model_type, data_hash) pairs."""
         registry = []
         for model_type, data_hash in entries:
+            TestDataHashValidation._oof_counter += 1
+            seed = TestDataHashValidation._oof_counter
             entry = {
                 "model_type": model_type,
                 "model_path": f"outputs/model_{model_type}.pkl",
-                "cv_mean": 0.85,
+                "cv_mean": 0.85 + seed * 0.001,
                 "data_hash": data_hash,
+                "oof_predictions": [0.8 + seed * 0.01 * i for i in range(10)],
             }
             registry.append(entry)
         return registry

@@ -356,70 +356,62 @@ def build_graph() -> StateGraph:
     # ── Set entry point ───────────────────────────────────────────
     graph.set_entry_point("semantic_router")
 
+    # All possible node targets for DAG-driven conditional edges
+    _all_nodes = {
+        "competition_intel": "competition_intel",
+        "data_engineer":     "data_engineer",
+        "eda_agent":         "eda_agent",
+        "validation_architect": "validation_architect",
+        "feature_factory":   "feature_factory",
+        "ml_optimizer":      "ml_optimizer",
+        "red_team_critic":   "red_team_critic",
+        "supervisor_replan": "supervisor_replan",
+        "submit":            "submit",
+        END:                 END,
+    }
+
     # ── Add edges ─────────────────────────────────────────────────
     graph.add_conditional_edges(
         "semantic_router",
         route_after_router,
-        {
-            "competition_intel": "competition_intel",
-            END:             END,
-        }
+        _all_nodes,
     )
 
     graph.add_conditional_edges(
         "competition_intel",
         route_after_intel,
-        {
-            "data_engineer": "data_engineer",
-            END:             END,
-        }
+        _all_nodes,
     )
 
     graph.add_conditional_edges(
         "data_engineer",
         route_after_data_engineer,
-        {
-            "eda_agent": "eda_agent",
-            END:             END,
-        }
+        _all_nodes,
     )
 
     graph.add_conditional_edges(
         "eda_agent",
         route_after_eda,
-        {
-            "validation_architect": "validation_architect",
-            END:             END,
-        }
+        _all_nodes,
     )
 
     graph.add_conditional_edges(
         "validation_architect",
         route_after_validation,
-        {
-            "ml_optimizer": "ml_optimizer",
-            END:             END,
-        }
+        _all_nodes,
     )
 
     graph.add_conditional_edges(
         "ml_optimizer",
         route_after_optimizer,
-        {
-            "red_team_critic": "red_team_critic",
-            END:               END,
-        }
+        _all_nodes,
     )
 
     # Day 11: Critic → conditional routing
     graph.add_conditional_edges(
         "red_team_critic",
         route_after_critic,
-        {
-            "supervisor_replan": "supervisor_replan",
-            "submit":            "submit",
-            END:                 END,
-        }
+        _all_nodes,
     )
 
     # Feature factory stub → advance to ml_optimizer
@@ -429,10 +421,7 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "supervisor_replan",
         route_after_supervisor_replan,
-        {
-            **{node: node for node in NODE_PRIORITY},
-            END: END,
-        }
+        _all_nodes,
     )
 
     graph.add_edge("submit", END)

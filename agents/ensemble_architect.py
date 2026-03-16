@@ -24,7 +24,7 @@ def _validate_data_hash_consistency(state: ProfessorState) -> ProfessorState:
     Filters to current-hash models if mismatch detected.
     Logs WARNING if any filtering occurs.
     """
-    registry = state.get("model_registry", {})
+    registry = state.get("model_registry", [])
     if not registry:
         raise ValueError("model_registry is empty — no models to ensemble.")
 
@@ -36,9 +36,10 @@ def _validate_data_hash_consistency(state: ProfessorState) -> ProfessorState:
         )
         return state
 
-    # Extract hash from every registry entry
+    # Extract hash from every registry entry (list format per state spec)
     hashes = {}
-    for name, entry in registry.items():
+    for entry in registry:
+        name = entry.get("model_type", "unknown")
         hashes[name] = entry.get("data_hash")
 
     unique_hashes = set(h for h in hashes.values() if h is not None)
@@ -62,10 +63,10 @@ def _validate_data_hash_consistency(state: ProfessorState) -> ProfessorState:
             f"{unique_hashes}. "
             f"Filtering to only models matching current data_hash={current_hash}."
         )
-        filtered_registry = {
-            name: entry for name, entry in registry.items()
+        filtered_registry = [
+            entry for entry in registry
             if entry.get("data_hash") == current_hash
-        }
+        ]
 
         if not filtered_registry:
             raise ValueError(
@@ -255,7 +256,7 @@ def select_diverse_ensemble(
         ensemble_oof_mean = sum(oof_arrays[m] for m in selected) / n
 
     # Compute final ensemble weights (equal for now — Nelder-Mead in Phase 3)
-    ensemble_weights = {m: 1.0 / len(selected) for m in selected}
+    ensemble_weights = _compute_ensemble_weights(selected)
 
     # Build correlation matrix for logging
     correlation_matrix = _build_correlation_matrix(
@@ -280,6 +281,11 @@ def select_diverse_ensemble(
     }
 
 
+def _compute_ensemble_weights(selected_models: list) -> dict:
+    """Compute equal weights for selected ensemble models."""
+    return {m: 1.0 / len(selected_models) for m in selected_models}
+
+
 def blend_models(state: ProfessorState) -> ProfessorState:
     """
     Blend models from registry into an ensemble.
@@ -290,9 +296,17 @@ def blend_models(state: ProfessorState) -> ProfessorState:
     # Data hash validation MUST come first — before any blending
     state = _validate_data_hash_consistency(state)
 
+    # Convert list-format registry to dict for internal ensemble logic
+    registry_list = state.get("model_registry", [])
+    if isinstance(registry_list, list):
+        registry_dict = {entry.get("model_type", f"model_{i}"): entry
+                         for i, entry in enumerate(registry_list)}
+    else:
+        registry_dict = registry_list
+
     # Diversity selection — replaces naive top-N
     selection_result = select_diverse_ensemble(
-        model_registry=state["model_registry"],
+        model_registry=registry_dict,
         state=state,
     )
 
@@ -316,7 +330,7 @@ def blend_models(state: ProfessorState) -> ProfessorState:
 
     # Blend using selected models and weights
     oof_stack = np.column_stack([
-        np.array(state["model_registry"][m]["oof_predictions"], dtype=float)
+        np.array(registry_dict[m]["oof_predictions"], dtype=float)
         for m in selection_result["selected_models"]
     ])
     weights = np.array([

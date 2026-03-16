@@ -17,6 +17,8 @@ import pytest
 def reset_graph_singleton():
     """Ensures each test gets a fresh graph if it modifies graph structure."""
     yield
-    from core.professor import get_graph_cache_clear
-    get_graph_cache_clear()
+    # Only clear if professor module was already imported (avoid expensive import on every test)
+    prof = sys.modules.get("core.professor")
+    if prof is not None:
+        prof.get_graph_cache_clear()
 

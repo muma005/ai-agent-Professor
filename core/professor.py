@@ -32,6 +32,7 @@ from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 from agents.red_team_critic import run_red_team_critic
 from agents.feature_factory import run_feature_factory
+from agents.pseudo_label_agent import run_pseudo_label_agent
 from agents.supervisor import run_supervisor_replan, get_replan_target, MAX_REPLAN_ATTEMPTS, NODE_PRIORITY
 
 logger = logging.getLogger(__name__)
@@ -352,6 +353,7 @@ def build_graph() -> StateGraph:
     graph.add_node("feature_factory", run_feature_factory)
     graph.add_node("supervisor_replan", run_supervisor_replan)
     graph.add_node("submit",          run_submit)
+    graph.add_node("pseudo_label_agent", run_pseudo_label_agent)
 
     # ── Set entry point ───────────────────────────────────────────
     graph.set_entry_point("semantic_router")
@@ -366,6 +368,7 @@ def build_graph() -> StateGraph:
         "ml_optimizer":      "ml_optimizer",
         "red_team_critic":   "red_team_critic",
         "supervisor_replan": "supervisor_replan",
+        "pseudo_label_agent": "pseudo_label_agent",
         "submit":            "submit",
         END:                 END,
     }

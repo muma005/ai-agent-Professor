@@ -1,9 +1,11 @@
 # agents/feature_factory.py
 # -------------------------------------------------------------------------
 # Day 16: Feature Factory — Rounds 1 (generic) + 2 (domain/LLM)
+# Day 17: Wilcoxon gate + null importance filtering.
+# Day 18: Rounds 3 (aggregation) + 4 (target encoding) + 5 (hypothesis +
+#          interactions) + interaction budget cap.
 # Reads schema.json + competition_brief.json only — never raw data.
 # Writes feature_manifest.json with per-feature metadata.
-# Day 17: Wilcoxon gate + null importance filtering.
 # -------------------------------------------------------------------------
 
 import json
@@ -15,6 +17,7 @@ from datetime import datetime
 
 import polars as pl
 import numpy as np
+from sklearn.model_selection import KFold
 
 from core.state import ProfessorState
 from core.lineage import log_event
@@ -23,6 +26,13 @@ from tools.wilcoxon_gate import feature_gate_result, is_feature_worth_adding
 from tools.null_importance import run_null_importance_filter
 
 logger = logging.getLogger(__name__)
+
+# ── Constants ────────────────────────────────────────────────────
+MAX_ROUND3_CANDIDATES = 200
+MAX_ROUND4_CANDIDATES = 30
+MAX_INTERACTION_FEATURES = 20
+MAX_INTERACTION_CANDIDATES = 500
+ROUND3_AGG_FUNCTIONS = ["mean", "std", "min", "max", "count"]
 
 
 # ── Feature candidate dataclass ──────────────────────────────────
@@ -251,6 +261,475 @@ def _generate_round2_features(
     return candidates
 
 
+# ── Schema helper functions ──────────────────────────────────────
+
+def _is_categorical(col: dict) -> bool:
+    """Check if a schema column is categorical."""
+    dtype = col.get("dtype", "").lower()
+    n_unique = int(col.get("n_unique", 0))
+    return any(t in dtype for t in ("str", "cat", "object")) or n_unique < 50
+
+
+def _is_numeric(col: dict) -> bool:
+    """Check if a schema column is numeric."""
+    dtype = col.get("dtype", "").lower()
+    return any(t in dtype for t in ("float", "int"))
+
+
+def _find_col(schema: dict, name: str) -> dict:
+    """Find a column definition in schema by name."""
+    for c in schema.get("columns", []):
+        if c["name"] == name:
+            return c
+    return {}
+
+
+# ── Round 3: Aggregation features (groupby stats) ───────────────
+
+def _generate_round3_aggregation_features(schema: dict) -> list[FeatureCandidate]:
+    """
+    Round 3: groupby aggregation features.
+
+    For each (categorical, numeric) pair:
+      - categorical: dtype contains 'str', 'cat', 'object', or n_unique < 50
+      - numeric: dtype contains 'float' or 'int', not id, not target
+      - generate: mean, std, min, max, count of numeric grouped by categorical
+
+    Hard cap: MAX_ROUND3_CANDIDATES. If exceeded, rank by
+    (1/(n_unique_categorical+1)) * n_unique_numeric descending and take top N.
+    """
+    columns = schema.get("columns", [])
+    candidates = []
+
+    categoricals = [
+        c for c in columns
+        if not c.get("is_id") and not c.get("is_target")
+        and _is_categorical(c)
+    ]
+
+    numerics = [
+        c for c in columns
+        if not c.get("is_id") and not c.get("is_target")
+        and _is_numeric(c)
+    ]
+
+    for cat in categoricals:
+        for num in numerics:
+            if cat["name"] == num["name"]:
+                continue
+            for fn in ROUND3_AGG_FUNCTIONS:
+                candidates.append(FeatureCandidate(
+                    name=f"{num['name']}_{fn}_by_{cat['name']}",
+                    source_columns=[num["name"], cat["name"]],
+                    transform_type="groupby_agg",
+                    description=(
+                        f"{fn} of {num['name']} grouped by {cat['name']}. "
+                        f"Captures within-group statistics."
+                    ),
+                    round=3,
+                ))
+
+    # Cap
+    if len(candidates) > MAX_ROUND3_CANDIDATES:
+        def _agg_priority(c: FeatureCandidate) -> float:
+            cat_col = _find_col(schema, c.source_columns[1])
+            num_col = _find_col(schema, c.source_columns[0])
+            cat_card = float(cat_col.get("n_unique", 1))
+            num_unique = float(num_col.get("n_unique", 1))
+            return (1.0 / (cat_card + 1)) * num_unique
+
+        candidates = sorted(candidates, key=_agg_priority, reverse=True)[:MAX_ROUND3_CANDIDATES]
+
+    logger.info(f"[feature_factory] Round 3: {len(candidates)} aggregation candidates.")
+    return candidates
+
+
+def _apply_round3_transforms(X: pl.DataFrame, candidates: list[FeatureCandidate]) -> pl.DataFrame:
+    """Applies groupby aggregation transforms using Polars group_by+join."""
+    for c in candidates:
+        if c.transform_type != "groupby_agg":
+            continue
+        num_col, cat_col = c.source_columns[0], c.source_columns[1]
+        if num_col not in X.columns or cat_col not in X.columns:
+            continue
+        # Extract fn name from candidate name: "{num}_{fn}_by_{cat}"
+        parts = c.name.split("_")
+        # Find the fn name that follows the numeric column name
+        fn_name = None
+        for fn in ROUND3_AGG_FUNCTIONS:
+            if f"_{fn}_by_" in c.name:
+                fn_name = fn
+                break
+        if fn_name is None:
+            continue
+        agg_fn = {
+            "mean": pl.col(num_col).mean(),
+            "std":  pl.col(num_col).std(),
+            "min":  pl.col(num_col).min(),
+            "max":  pl.col(num_col).max(),
+            "count": pl.col(num_col).count(),
+        }.get(fn_name)
+        if agg_fn is None:
+            continue
+        group_stats = X.group_by(cat_col).agg(agg_fn.alias(c.name))
+        X = X.join(group_stats, on=cat_col, how="left")
+    return X
+
+
+# ── Round 4: CV-safe target encoding ────────────────────────────
+
+def _generate_round4_target_encoding_candidates(schema: dict) -> list[FeatureCandidate]:
+    """
+    Round 4: CV-safe target encoding candidates.
+
+    Only for categorical columns with 2 <= n_unique <= 200.
+    Sorted by n_unique descending. Capped at MAX_ROUND4_CANDIDATES.
+    """
+    columns = schema.get("columns", [])
+    candidates = []
+
+    for col in columns:
+        if col.get("is_id") or col.get("is_target"):
+            continue
+        if not _is_categorical(col):
+            continue
+        n_unique = int(col.get("n_unique", 0))
+        if n_unique < 2 or n_unique > 200:
+            continue
+
+        candidates.append(FeatureCandidate(
+            name=f"te_{col['name']}",
+            source_columns=[col["name"]],
+            transform_type="target_encoding",
+            description=(
+                f"CV-safe leave-one-out target encoding of {col['name']}. "
+                f"n_unique={n_unique}. Computed within folds only."
+            ),
+            round=4,
+        ))
+
+    candidates.sort(
+        key=lambda c: int(_find_col(schema, c.source_columns[0]).get("n_unique", 0)),
+        reverse=True,
+    )
+    return candidates[:MAX_ROUND4_CANDIDATES]
+
+
+def _apply_round4_target_encoding(
+    X: pl.DataFrame,
+    y: np.ndarray,
+    candidates: list[FeatureCandidate],
+    n_folds: int = 5,
+    smoothing: float = 30.0,
+) -> pl.DataFrame:
+    """
+    Applies CV-safe target encoding.
+
+    For each fold:
+      - Compute mean(y) per category using the OTHER folds only
+      - Apply smoothing: (count * group_mean + smoothing * global_mean) / (count + smoothing)
+      - Assign to current fold rows only
+
+    Unseen categories get global_mean.
+    """
+    target_enc_cols = [c for c in candidates if c.transform_type == "target_encoding"]
+    if not target_enc_cols:
+        return X
+
+    global_mean = float(np.mean(y))
+    n = len(y)
+    fold_assignments = np.zeros(n, dtype=int)
+
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    for fold_idx, (_, val_idx) in enumerate(kf.split(np.arange(n))):
+        fold_assignments[val_idx] = fold_idx
+
+    result_X = X.clone()
+
+    for candidate in target_enc_cols:
+        col = candidate.source_columns[0]
+        if col not in X.columns:
+            continue
+
+        encoded = np.full(n, global_mean, dtype=np.float64)
+        col_values = X[col].to_numpy()
+
+        for fold_idx in range(n_folds):
+            train_mask = fold_assignments != fold_idx
+            val_mask = fold_assignments == fold_idx
+
+            cat_values_train = col_values[train_mask]
+            y_train_fold = y[train_mask]
+
+            # Compute per-category stats from training portion only
+            cat_stats: dict = {}
+            for cat, target in zip(cat_values_train, y_train_fold):
+                key = str(cat)
+                if key not in cat_stats:
+                    cat_stats[key] = [0.0, 0]
+                cat_stats[key][0] += float(target)
+                cat_stats[key][1] += 1
+
+            # Apply smoothed encoding to validation portion
+            val_indices = np.where(val_mask)[0]
+            for idx in val_indices:
+                key = str(col_values[idx])
+                if key in cat_stats:
+                    sum_t, count = cat_stats[key]
+                    group_mean = sum_t / count
+                    encoded[idx] = (
+                        (count * group_mean + smoothing * global_mean)
+                        / (count + smoothing)
+                    )
+                # Unseen categories -> global mean (already set as default)
+
+        result_X = result_X.with_columns(
+            pl.Series(name=candidate.name, values=encoded)
+        )
+
+    return result_X
+
+
+# ── Round 5: Hypothesis testing + creative interactions ──────────
+
+ROUND5_HYPOTHESIS_PROMPT = """
+You are a Kaggle feature engineer. For each unvalidated hypothesis below, generate one feature
+that would test whether the hypothesis is true for this competition's data.
+
+Competition: {competition_name}
+Domain: {domain}
+
+Unvalidated hypotheses from competition forum:
+{hypotheses}
+
+Available columns (from schema.json):
+{column_summary}
+
+For each hypothesis, return a JSON object:
+{{
+  "hypothesis_index": int,
+  "hypothesis_summary": "brief restatement",
+  "feature_name": "snake_case_name",
+  "source_columns": ["col1", "col2"],
+  "transform_type": "ratio | interaction | bin | polynomial",
+  "expression": "e.g. 'col1 / (col2 + 1)' or 'col1 * col2'",
+  "validation_logic": "How a high value of this feature would confirm the hypothesis"
+}}
+
+Return a JSON array. Include only hypotheses where a concrete feature test is possible.
+Maximum 10 features.
+"""
+
+
+def _generate_round5_hypothesis_features(
+    schema: dict,
+    competition_brief: dict,
+    state: ProfessorState,
+) -> list[FeatureCandidate]:
+    """
+    Round 5a: Generate features that directly test forum hypotheses.
+    Only generates for insights with validated=False.
+    """
+    insights = [
+        ins for ins in competition_brief.get("insights", [])
+        if ins.get("validated") is False
+    ]
+
+    if not insights:
+        logger.info("[feature_factory] Round 5: no unvalidated hypotheses to test.")
+        return []
+
+    hypotheses_text = "\n".join(
+        f"{i+1}. {ins['content']} (source: {ins.get('source', 'forum')})"
+        for i, ins in enumerate(insights[:10])
+    )
+
+    column_summary = "\n".join(
+        f"  {c['name']} ({c['dtype']}, {c['n_unique']} unique)"
+        for c in schema.get("columns", [])
+        if not c.get("is_id") and not c.get("is_target")
+    )
+
+    prompt = ROUND5_HYPOTHESIS_PROMPT.format(
+        competition_name=state.get("competition_name", "unknown"),
+        domain=competition_brief.get("domain", "tabular"),
+        hypotheses=hypotheses_text,
+        column_summary=column_summary,
+    )
+
+    try:
+        response = call_llm(prompt, system="", model="deepseek")
+        raw = _extract_json(response)
+        items = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"[feature_factory] Round 5 hypothesis LLM failed: {e}. Returning [].")
+        return []
+
+    schema_col_names = {c["name"] for c in schema.get("columns", [])}
+    candidates = []
+
+    for item in items[:10]:
+        sources = item.get("source_columns", [])
+        unknown = [s for s in sources if s not in schema_col_names]
+        if unknown:
+            logger.warning(
+                f"[feature_factory] Round 5a candidate '{item.get('feature_name', '?')}' "
+                f"references unknown columns {unknown}. Skipping."
+            )
+            continue
+        candidates.append(FeatureCandidate(
+            name=item["feature_name"],
+            source_columns=sources,
+            transform_type=item.get("transform_type", "interaction"),
+            description=f"Hypothesis test: {item.get('hypothesis_summary', '')}. "
+                        f"Expression: {item.get('expression', '')}",
+            round=5,
+        ))
+
+    logger.info(f"[feature_factory] Round 5a: {len(candidates)} hypothesis features.")
+    return candidates
+
+
+def _generate_round5_interaction_features(
+    schema: dict,
+    competition_brief: dict,
+    top_features_by_importance: list[str],
+    max_k: int = MAX_INTERACTION_FEATURES,
+) -> list[FeatureCandidate]:
+    """
+    Round 5b: Creative interactions between top-K features.
+
+    Uses competition_brief["meaningful_interactions"] to limit pairs
+    to domain-meaningful ones first, then fills with top-K pairs.
+    """
+    top_k = top_features_by_importance[:max_k]
+    meaningful_pairs = competition_brief.get("meaningful_interactions", [])
+
+    candidates = []
+
+    # Domain-guided pairs first
+    schema_col_names = {c["name"] for c in schema.get("columns", [])}
+    for pair in meaningful_pairs:
+        if len(pair) < 2:
+            continue
+        a, b = pair[0], pair[1]
+        if a not in schema_col_names or b not in schema_col_names:
+            continue
+        if a not in top_k or b not in top_k:
+            continue
+        for op, op_name in [("multiply", "x"), ("divide", "div"), ("add", "plus")]:
+            candidates.append(FeatureCandidate(
+                name=f"{a}_{op_name}_{b}",
+                source_columns=[a, b],
+                transform_type=f"interaction_{op}",
+                description=f"Domain-guided interaction: {a} {op} {b}",
+                round=5,
+            ))
+
+    # Fill remaining with all top-K pairs not already covered
+    existing_pairs = {tuple(sorted(c.source_columns[:2])) for c in candidates}
+    for i, a in enumerate(top_k):
+        for b in top_k[i + 1:]:
+            if tuple(sorted([a, b])) in existing_pairs:
+                continue
+            candidates.append(FeatureCandidate(
+                name=f"{a}_x_{b}",
+                source_columns=[a, b],
+                transform_type="interaction_multiply",
+                description=f"Pairwise interaction: {a} * {b}",
+                round=5,
+            ))
+
+    logger.info(
+        f"[feature_factory] Round 5b: {len(candidates)} interaction candidates "
+        f"(before budget cap)."
+    )
+    return candidates
+
+
+# ── Interaction budget cap ───────────────────────────────────────
+
+def _apply_interaction_budget_cap(
+    candidates: list[FeatureCandidate],
+    all_round_candidates: list[FeatureCandidate],
+    max_cap: int = MAX_INTERACTION_CANDIDATES,
+) -> list[FeatureCandidate]:
+    """
+    Hard budget cap on interaction candidates (Round 5b) only.
+    Non-interaction candidates (Rounds 1-4, Round 5a) are never capped.
+    """
+    interaction_candidates = [
+        c for c in candidates
+        if c.transform_type.startswith("interaction_")
+    ]
+    non_interaction = [
+        c for c in all_round_candidates
+        if not c.transform_type.startswith("interaction_")
+    ]
+
+    if len(interaction_candidates) <= max_cap:
+        return all_round_candidates
+
+    def _score(c: FeatureCandidate) -> float:
+        domain_rel = 2.0 if "_domain" in c.description.lower() else 1.0
+        return domain_rel
+
+    interaction_candidates.sort(key=_score, reverse=True)
+    kept_interactions = interaction_candidates[:max_cap]
+
+    total_before = len(interaction_candidates)
+    total_after = len(kept_interactions)
+    logger.info(
+        f"[feature_factory] Interaction budget cap: "
+        f"{total_before} -> {total_after} interaction candidates "
+        f"(max={max_cap}). "
+        f"Dropped {total_before - total_after} low-priority interactions."
+    )
+
+    return non_interaction + kept_interactions
+
+
+def _apply_interaction_budget_cap_with_importance(
+    candidates: list[FeatureCandidate],
+    null_importance_result,
+    meaningful_interactions: list[list[str]],
+    max_cap: int = MAX_INTERACTION_CANDIDATES,
+) -> list[FeatureCandidate]:
+    """
+    Extended budget cap that uses null importance percentiles for scoring.
+    """
+    interaction_candidates = [
+        c for c in candidates if c.transform_type.startswith("interaction_")
+    ]
+    non_interaction = [
+        c for c in candidates if not c.transform_type.startswith("interaction_")
+    ]
+
+    if len(interaction_candidates) <= max_cap:
+        return candidates
+
+    # Build importance lookup from null importance
+    importance_lookup: dict[str, float] = {}
+    if null_importance_result and hasattr(null_importance_result, 'actual_vs_threshold'):
+        for feat, info in null_importance_result.actual_vs_threshold.items():
+            importance_lookup[feat] = float(info.get("actual", 1.0))
+
+    # Build domain relevance set
+    domain_pairs = {
+        tuple(sorted(pair[:2])) for pair in meaningful_interactions if len(pair) >= 2
+    }
+
+    def _score(c: FeatureCandidate) -> float:
+        pair_key = tuple(sorted(c.source_columns[:2]))
+        domain_rel = 2.0 if pair_key in domain_pairs else 1.0
+        imp_a = importance_lookup.get(c.source_columns[0], 1.0)
+        imp_b = importance_lookup.get(c.source_columns[1], 1.0) if len(c.source_columns) > 1 else 1.0
+        return domain_rel * (imp_a * imp_b)
+
+    interaction_candidates.sort(key=_score, reverse=True)
+    return non_interaction + interaction_candidates[:max_cap]
+
+
 # ── Day 17: Statistical feature evaluation ──────────────────────
 
 def _quick_cv(
@@ -415,10 +894,7 @@ def _build_feature_manifest(candidates: list[FeatureCandidate], schema: dict) ->
 def run_feature_factory(state: ProfessorState) -> ProfessorState:
     """
     Feature Factory main node.
-    Reads schema.json and competition_brief.json only.
-    Generates Round 1 (generic) + Round 2 (domain) candidates.
-    Writes feature_manifest.json.
-    Day 17 adds Wilcoxon gate + null importance filtering.
+    Rounds 1-5 + interaction budget cap + Wilcoxon gate + null importance.
     """
     session_id = state["session_id"]
 
@@ -435,14 +911,45 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
     brief_path = Path(f"outputs/{session_id}/competition_brief.json")
     competition_brief = json.loads(brief_path.read_text()) if brief_path.exists() else {}
 
-    # Generate candidates
+    # Generate candidates — all 5 rounds
     round1_candidates = _generate_round1_features(schema)
     round2_candidates = _generate_round2_features(schema, competition_brief, state)
-    all_candidates = round1_candidates + round2_candidates
+    round3_candidates = _generate_round3_aggregation_features(schema)
+    round4_candidates = _generate_round4_target_encoding_candidates(schema)
+
+    # Round 5: interaction candidates receive top features from null importance
+    null_result = state.get("null_importance_result")
+    top_features_by_importance = (
+        null_result.survivors if null_result and hasattr(null_result, 'survivors') else
+        [c["name"] for c in schema.get("columns", [])
+         if not c.get("is_id") and not c.get("is_target")]
+    )
+
+    round5a_candidates = _generate_round5_hypothesis_features(schema, competition_brief, state)
+    round5b_candidates = _generate_round5_interaction_features(
+        schema, competition_brief, top_features_by_importance
+    )
+    round5_candidates = round5a_candidates + round5b_candidates
+
+    all_candidates = (
+        round1_candidates + round2_candidates +
+        round3_candidates + round4_candidates +
+        round5_candidates
+    )
+
+    # Apply interaction budget cap
+    all_candidates = _apply_interaction_budget_cap_with_importance(
+        candidates=all_candidates,
+        null_importance_result=state.get("null_importance_result"),
+        meaningful_interactions=competition_brief.get("meaningful_interactions", []),
+        max_cap=MAX_INTERACTION_CANDIDATES,
+    )
 
     logger.info(
-        f"[feature_factory] Candidates: {len(round1_candidates)} Round 1 + "
-        f"{len(round2_candidates)} Round 2 = {len(all_candidates)} total"
+        f"[feature_factory] Candidates: R1={len(round1_candidates)} R2={len(round2_candidates)} "
+        f"R3={len(round3_candidates)} R4={len(round4_candidates)} "
+        f"R5a={len(round5a_candidates)} R5b={len(round5b_candidates)} "
+        f"total={len(all_candidates)}"
     )
 
     # Day 17: Statistical filtering (requires clean data)
@@ -534,6 +1041,10 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         values_changed={
             "round1_candidates": len(round1_candidates),
             "round2_candidates": len(round2_candidates),
+            "round3_candidates": len(round3_candidates),
+            "round4_candidates": len(round4_candidates),
+            "round5a_candidates": len(round5a_candidates),
+            "round5b_candidates": len(round5b_candidates),
             "total_kept": len(kept_candidates),
             "dropped": len(all_candidates) - len(kept_candidates),
             "gate_passed": len(gate_passed),
@@ -547,6 +1058,9 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         "feature_candidates": [c.name for c in kept_candidates],
         "round1_features": [c.name for c in round1_candidates],
         "round2_features": [c.name for c in round2_candidates],
+        "round3_features": [c.name for c in round3_candidates],
+        "round4_features": [c.name for c in round4_candidates],
+        "round5_features": [c.name for c in round5_candidates],
         "features_gate_passed": gate_passed,
         "features_gate_dropped": gate_dropped,
     }

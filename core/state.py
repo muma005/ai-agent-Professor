@@ -177,6 +177,18 @@ class ProfessorState(TypedDict):
     features_gate_passed: Annotated[Optional[list], _replace]
     features_gate_dropped: Annotated[Optional[list], _replace]
 
+    # -- Feature Factory Rounds 3-5 (Day 18) -----------------------
+    round3_features: Annotated[Optional[list], _replace]
+    round4_features: Annotated[Optional[list], _replace]
+    round5_features: Annotated[Optional[list], _replace]
+
+    # -- Pseudo-Labeling (Day 18) ----------------------------------
+    pseudo_label_result: Optional[object]          # PseudoLabelResult (not JSON-serialisable)
+    X_train_with_pseudo: Optional[object]          # pl.DataFrame
+    y_train_with_pseudo: Optional[object]          # np.ndarray
+    pseudo_labels_applied: bool
+    pseudo_label_cv_improvement: float
+
     # -- External Data Scout (Day 15) ------------------------------
     external_data_allowed: bool
     external_data_manifest: dict
@@ -318,6 +330,16 @@ def initial_state(
         features_dropped_stage2=None,
         features_gate_passed=None,
         features_gate_dropped=None,
+        # -- Feature Factory Rounds 3-5 (Day 18) --
+        round3_features=None,
+        round4_features=None,
+        round5_features=None,
+        # -- Pseudo-Labeling (Day 18) --
+        pseudo_label_result=None,
+        X_train_with_pseudo=None,
+        y_train_with_pseudo=None,
+        pseudo_labels_applied=False,
+        pseudo_label_cv_improvement=0.0,
         # -- External Data Scout (Day 15) --
         external_data_allowed=False,
         external_data_manifest={},

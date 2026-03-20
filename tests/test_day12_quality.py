@@ -65,6 +65,7 @@ class TestMLOptimizerMemoryManagement:
         
         X, y, cv_folds, task_type, contract = mock_classification_data()
         trial = MagicMock(spec=optuna.Trial)
+        trial.suggest_categorical.return_value = "lgbm"
         trial.suggest_int.return_value = 100
         trial.suggest_float.return_value = 0.1
         trial.number = 1
@@ -84,6 +85,7 @@ class TestMLOptimizerMemoryManagement:
         
         X, y, cv_folds, task_type, contract = mock_classification_data()
         trial = MagicMock(spec=optuna.Trial)
+        trial.suggest_categorical.return_value = "lgbm"
         trial.suggest_int.return_value = 100
         trial.suggest_float.return_value = 0.1
         trial.number = 1
@@ -107,6 +109,7 @@ class TestMLOptimizerMemoryManagement:
         
         X, y, cv_folds, task_type, contract = mock_classification_data()
         trial = MagicMock(spec=optuna.Trial)
+        trial.suggest_categorical.return_value = "lgbm"
         trial.suggest_int.return_value = 100
         trial.suggest_float.return_value = 0.1
         trial.number = 1
@@ -128,19 +131,15 @@ class TestMLOptimizerMemoryManagement:
             
             with patch("agents.ml_optimizer.read_parquet"), patch("agents.ml_optimizer.read_json"), patch("agents.ml_optimizer._identify_target_column"):
                 with patch("agents.ml_optimizer._prepare_features", return_value=(X, y, [])):
-                    with patch("agents.ml_optimizer.run_optimization") as mock_run:
-                        with patch("agents.ml_optimizer.lgb.LGBMClassifier.fit"):
-                            with patch("agents.ml_optimizer.lgb.LGBMClassifier.predict_proba", return_value=np.zeros((20, 2))):
-                                # Mocks an empty optuna run successfully but bypass AttributeError for `best_params` setter 
-                                mock_run.return_value = MagicMock(spec=optuna.Study)
-                                mock_run.return_value.best_params = {"n_estimators": 10}
-                                try:
-                                    run_ml_optimizer(state)
-                                except Exception:
-                                    pass
-                                
-                                kwargs = mock_run.call_args[1]
-                                assert kwargs.get("max_memory_gb") == 5.0
+                    with patch("agents.ml_optimizer._memory_callback") as mock_mem_cb:
+                        with patch("optuna.Study.optimize"):
+                            try:
+                                run_ml_optimizer(state)
+                            except Exception:
+                                pass
+                            
+                            # _memory_callback is called with MAX_MEMORY_GB from env
+                            mock_mem_cb.assert_any_call(5.0)
     def test_max_memory_gb_env_var_invalid_falls_back_to_default(self):
         with patch.dict(os.environ, {"PROFESSOR_MAX_MEMORY_GB": "not_a_number"}):
             # float() throws ValueError, which is fine, meaning users shouldn't set invalid numbers.

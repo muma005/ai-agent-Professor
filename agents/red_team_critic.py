@@ -667,6 +667,50 @@ def _calibration_check(
     return result
 
 
+def _check_calibration_quality(state) -> dict:
+    """
+    Checks calibration for all models in registry when metric is probability-based.
+    """
+    from agents.ml_optimizer import PROBABILITY_METRICS
+
+    metric = state.get("evaluation_metric", "")
+    if metric not in PROBABILITY_METRICS:
+        return {"verdict": "OK", "note": "Non-probability metric — calibration check skipped."}
+
+    registry = state.get("model_registry", {})
+    if isinstance(registry, list):
+        registry = {str(i): e for i, e in enumerate(registry)}
+    warnings = []
+
+    for model_name, entry in registry.items():
+        if not entry.get("is_calibrated", False):
+            warnings.append({
+                "model":   model_name,
+                "issue":   "Model not calibrated despite probability metric",
+                "action":  "Check that calibration step ran for this model.",
+            })
+
+        brier = entry.get("calibration_score")
+        if brier is not None and brier > 0.25:
+            warnings.append({
+                "model":  model_name,
+                "issue":  f"Poor calibration: Brier score = {brier:.4f} (> 0.25 threshold)",
+                "action": "Consider recalibration with more samples or a different method.",
+            })
+
+    if not warnings:
+        return {"verdict": "OK", "note": f"All {len(registry)} models calibrated for {metric}."}
+
+    return {
+        "verdict":  "HIGH",
+        "warnings": warnings,
+        "note": (
+            f"Calibration issues found for probability metric '{metric}'. "
+            "Poor calibration directly harms log-loss and Brier score."
+        ),
+    }
+
+
 def _check_robustness(
     X_train: pl.DataFrame,
     y_true,
@@ -960,6 +1004,7 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
         model_registry=list(state.get("model_registry") or []),
     ))
     _run_vector("historical_failures",  _check_historical_failures(state))
+    _run_vector("calibration_quality",   _check_calibration_quality(state))
 
     # -- Compute overall severity ------------------------------------------------
     overall = _overall_severity(findings)

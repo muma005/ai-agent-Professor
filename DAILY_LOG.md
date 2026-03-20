@@ -2,6 +2,72 @@
 
 ---
 
+## Day 19 -- 2026-03-20 -- Prediction Calibration, Stability Validator, Optuna HPO
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Multi-model Optuna search with stability-first selection and probability calibration.
+
+**Tasks completed:**
+- [x] agents/ml_optimizer.py -- `_suggest_lgbm_params()`, `_suggest_xgb_params()`, `_suggest_catboost_params()`: per-model-type hyperparameter suggestion functions with `MODEL_SUGGESTERS` dispatch dict
+- [x] agents/ml_optimizer.py -- `_suggest_params()`: categorical model type selection across lgbm/xgb/catboost
+- [x] agents/ml_optimizer.py -- `_run_calibration()`: FrozenEstimator wrapping (sklearn 1.8 compat, replaces deprecated `cv='prefit'`), sigmoid/isotonic based on sample count
+- [x] agents/ml_optimizer.py -- `_select_calibration_method()`: sigmoid for <1000 samples, isotonic for >=1000
+- [x] agents/ml_optimizer.py -- `_split_calibration_fold()`: carve out calibration fold BEFORE CV folds (no data leakage)
+- [x] agents/ml_optimizer.py -- `_train_and_optionally_calibrate()`: unified train + optional calibration pipeline
+- [x] agents/ml_optimizer.py -- `run_ml_optimizer()` rewritten: Optuna study → top-K by mean_cv → stability rerun → Wilcoxon gate vs champion → calibration → registry update
+- [x] agents/ml_optimizer.py -- Adaptive trial count: `n_trials = min(N_OPTUNA_TRIALS, max(20, len(y)))`
+- [x] agents/ml_optimizer.py -- Local `_disable_langsmith_tracing()` to avoid circular import with core.professor
+- [x] tools/stability_validator.py -- `run_with_seeds()`: multi-seed training with graceful per-seed failure handling
+- [x] tools/stability_validator.py -- `rank_by_stability()`: descending sort by `stability_score = mean - 1.5 * std`
+- [x] tools/stability_validator.py -- `StabilityResult` dataclass, `format_stability_report()`, `DEFAULT_SEEDS=[42,7,123,999,2024]`
+- [x] agents/red_team_critic.py -- `_check_calibration_quality()`: flags uncalibrated models on probability metrics
+- [x] tests/contracts/test_ml_optimizer_optuna_contract.py -- 8 immutable contract tests (IMMUTABLE)
+- [x] tests/test_day19_quality.py -- 50 adversarial tests across 4 blocks (all green)
+
+**Bugs avoided (from spec):**
+1. `FrozenEstimator` wraps base model so CalibratedClassifierCV doesn't refit from scratch (sklearn 1.8 removed `cv='prefit'`)
+2. `stability_score = mean - 1.5 * std` (not `1.0 * std`) — more conservative penalty for variance
+3. Study direction set per metric (minimize for log_loss/cross_entropy, maximize for auc) — not hardcoded
+4. Top-K selected by `mean_cv` from Optuna (not stability_score, which hasn't been computed yet)
+5. Calibration fold carved out BEFORE CV loop — prevents data leakage into calibration
+
+**Regression fixes:**
+- tests/test_day12_quality.py: 3 mock trials updated with `suggest_categorical.return_value = "lgbm"` for MODEL_SUGGESTERS compat
+- tests/test_day12_quality.py: env var test updated — mock `_memory_callback` instead of removed `run_optimization` call
+
+**Test results:** 50 passed, 0 failed | Contracts: 8/8 | Old contract: 18/18 | Targeted regression: Day 12 (21/21), Day 13 (48/48) green
+
+**Commit hash:** 4bcc58b
+
+---
+
+## Day 18 -- 2026-03-18 -- Feature Factory Rounds 3-5, Interaction Cap, Pseudo-Labeling
+
+**Schedule status:** ON TRACK
+
+**Tests green before starting:** YES
+
+**The ONE thing for today:**
+Complete feature factory pipeline (rounds 3-5) and add pseudo-label agent for semi-supervised learning.
+
+**Tasks completed:**
+- [x] agents/feature_factory.py -- Round 3: interaction features with cap (max 15 interactions)
+- [x] agents/feature_factory.py -- Round 4: target encoding with cross-validation
+- [x] agents/feature_factory.py -- Round 5: polynomial features with degree cap
+- [x] agents/pseudo_label_agent.py -- `run_pseudo_label_agent()`: confidence-thresholded pseudo-labeling
+- [x] agents/pseudo_label_agent.py -- iterative self-training with convergence check
+- [x] tests/test_day18_quality.py -- 52 adversarial tests across 4 blocks (all green)
+
+**Test results:** 52 passed, 0 failed
+
+**Commit hash:** d24b93d
+
+---
+
 ## Day 17 -- 2026-03-16 -- Wilcoxon Feature Gate + Null Importance Two-Stage Filter
 
 **Schedule status:** ON TRACK

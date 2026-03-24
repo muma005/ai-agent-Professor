@@ -1,0 +1,24 @@
+{
+  "session_id": "harness_spaceship-titanic_1774254753",
+  "competition_id": "spaceship-titanic",
+  "competition_name": "Spaceship Titanic",
+  "run_timestamp": "2026-03-23T08:57:21.208450",
+  "private_score": null,
+  "cv_score": 0.8763037780529892,
+  "cv_lb_gap": null,
+  "metric": "accuracy",
+  "total_runtime_seconds": 1487.8,
+  "pipeline_seconds": 1487.7,
+  "pipeline_error": null,
+  "winning_model_type": null,
+  "n_features_final": null,
+  "n_features_dropped": 0,
+  "n_pseudo_label_iterations": 0,
+  "estimated_llm_cost_usd": 0.0,
+  "optimisation_flags": {
+    "PROFESSOR_FAST_MODE": "1",
+    "PROFESSOR_DEVICE": "cpu"
+  },
+  "n_professor_train_rows": 6954,
+  "n_private_test_rows": 1739
+}

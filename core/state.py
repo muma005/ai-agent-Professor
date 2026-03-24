@@ -60,11 +60,19 @@ class ProfessorState(TypedDict):
 
     # ── Data (pointers only -- never raw DataFrames in state) ─────
     raw_data_path: str
+    test_data_path: str           # path to test.csv (set by data_engineer)
+    sample_submission_path: str   # path to sample_submission.csv
     clean_data_path: str
     eda_report_path: str
     eda_report: dict
     schema_path: Optional[str]
+    preprocessor_path: Optional[str]
     data_hash: str     # SHA-256 of source file, first 16 chars
+
+    # ── Schema Authority (Phase 0) — single source of truth ───────
+    target_col: str               # authoritative target column name
+    id_columns: list              # authoritative ID column names
+    dropped_features: list        # features to exclude (set by EDA, consumed by all)
 
     # ── Feature Engineering (Day 16: feature factory) ─────────────
     # REPLACE: feature factory sets the full manifest each run
@@ -74,6 +82,8 @@ class ProfessorState(TypedDict):
     round2_features: Annotated[Optional[list], _replace]     # Round 2 domain feature names
     feature_factory_checkpoint: Optional[dict]
     feature_order: Annotated[Optional[list], _replace]   # exact column order at training time
+    feature_data_path: Optional[str]  # path to feature matrix parquet (set by feature_factory)
+    feature_data_path_test: Optional[str]  # path to test feature matrix (set by ml_optimizer)
 
     # ── Validation ────────────────────────────────────────────────
     cv_strategy: Optional[dict]
@@ -171,7 +181,7 @@ class ProfessorState(TypedDict):
     optuna_pruned_trials: int
 
     # -- Feature Filtering (Day 17) ---------------------------------
-    null_importance_result: Optional[object]       # NullImportanceResult (not JSON-serialisable)
+    null_importance_result_path: Optional[str]     # path to saved NullImportanceResult (disk, not state)
     features_dropped_stage1: Annotated[Optional[list], _replace]
     features_dropped_stage2: Annotated[Optional[list], _replace]
     features_gate_passed: Annotated[Optional[list], _replace]
@@ -183,9 +193,7 @@ class ProfessorState(TypedDict):
     round5_features: Annotated[Optional[list], _replace]
 
     # -- Pseudo-Labeling (Day 18) ----------------------------------
-    pseudo_label_result: Optional[object]          # PseudoLabelResult (not JSON-serialisable)
-    X_train_with_pseudo: Optional[object]          # pl.DataFrame
-    y_train_with_pseudo: Optional[object]          # np.ndarray
+    pseudo_label_data_path: Optional[str]          # path to pseudo-labeled data (disk, not state)
     pseudo_labels_applied: bool
     pseudo_label_cv_improvement: float
 
@@ -226,17 +234,26 @@ def initial_state(
             "last_updated":          None,
         },
         raw_data_path=data_path,
+        test_data_path="",
+        sample_submission_path="",
         clean_data_path="",
         eda_report_path="",
         eda_report={},
         schema_path=None,
+        preprocessor_path=None,
         data_hash="",
+        # -- Schema Authority (Phase 0) --
+        target_col="",
+        id_columns=[],
+        dropped_features=[],
         feature_manifest=None,
         feature_candidates=None,
         round1_features=None,
         round2_features=None,
         feature_factory_checkpoint=None,
         feature_order=[],
+        feature_data_path=None,
+        feature_data_path_test=None,
         cv_strategy=None,
         metric_contract=None,
         cv_scores=None,
@@ -325,7 +342,7 @@ def initial_state(
         memory_oom_risk=False,
         optuna_pruned_trials=0,
         # -- Feature Filtering (Day 17) --
-        null_importance_result=None,
+        null_importance_result_path=None,
         features_dropped_stage1=None,
         features_dropped_stage2=None,
         features_gate_passed=None,
@@ -335,9 +352,7 @@ def initial_state(
         round4_features=None,
         round5_features=None,
         # -- Pseudo-Labeling (Day 18) --
-        pseudo_label_result=None,
-        X_train_with_pseudo=None,
-        y_train_with_pseudo=None,
+        pseudo_label_data_path=None,
         pseudo_labels_applied=False,
         pseudo_label_cv_improvement=0.0,
         # -- External Data Scout (Day 15) --

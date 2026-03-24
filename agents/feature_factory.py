@@ -49,6 +49,7 @@ class FeatureCandidate:
     wilcoxon_p: float | None = None
     cv_delta: float | None = None
     verdict: str = "PENDING"  # PENDING | KEEP | DROP
+    expression: str | None = None
 
 
 # ── Round 1: generic transforms ─────────────────────────────────
@@ -66,14 +67,25 @@ def _generate_round1_features(schema: dict) -> list[FeatureCandidate]:
     candidates = []
     columns = schema.get("columns", [])
 
-    for col in columns:
-        name = col["name"]
-        dtype = col.get("dtype", "")
-        null_fraction = float(col.get("null_fraction", 0.0))
-        min_val = col.get("min")
-        n_unique = int(col.get("n_unique", 0))
-        is_id = col.get("is_id", False)
-        is_target = col.get("is_target", False)
+    for col_name in columns:
+        if isinstance(col_name, dict):
+            # Fallback if an older schema version was used
+            name = col_name.get("name", "")
+            dtype = col_name.get("dtype", "")
+            null_fraction = float(col_name.get("null_fraction", 0.0))
+            min_val = col_name.get("min")
+            n_unique = int(col_name.get("n_unique", 0))
+            is_id = col_name.get("is_id", False)
+            is_target = col_name.get("is_target", False)
+        else:
+            name = col_name
+            dtype = str(schema.get("types", {}).get(name, ""))
+            null_fraction = float(schema.get("missing_rates", {}).get(name, 0.0))
+            min_val = 0  # Assuming non-negative for imputation/log1p fallback if strictly numeric
+            n_unique = int(schema.get("cardinality", {}).get(name, 0))
+            # Heuristics for ID and target
+            is_id = any(kw in name.lower() for kw in ["id", "index"])
+            is_target = name == schema.get("target_col", "unknown")
 
         if is_id or is_target:
             continue
@@ -163,7 +175,7 @@ Available columns (from schema.json):
 Generate feature ideas that:
 1. Use ONLY the available columns listed above
 2. Are likely to improve model performance based on the domain
-3. Can be expressed as simple arithmetic, groupby-aggregation, or string extraction
+3. Can be expressed as valid Polars Python expressions
 
 Return a JSON array of feature candidates:
 [
@@ -171,17 +183,30 @@ Return a JSON array of feature candidates:
     "name": "feature_name_snake_case",
     "source_columns": ["col_a", "col_b"],
     "transform_type": "ratio | interaction | groupby_mean | groupby_std | string_extract | bin",
-    "expression": "Human-readable description of the transform",
+    "expression": "pl.col('col_a') / (pl.col('col_b') + 1)",
     "domain_rationale": "Why this feature is likely predictive given the domain"
   }}
 ]
+
+CRITICAL: The "expression" field MUST be a valid Polars Python expression string that can be evaluated with eval().
+Examples of VALID expressions:
+- "pl.col('feature_0') / (pl.col('feature_1') + 1)"
+- "(pl.col('feature_0') + pl.col('feature_1')) / 2"
+- "pl.col('feature_0') * pl.col('feature_1')"
+- "(pl.col('feature_0').cast(pl.Float64) + 1.0).log()"
+
+Examples of INVALID expressions (DO NOT USE):
+- "feature_0 divided by feature_1" (natural language, not code)
+- "Sum of all five features" (natural language)
+- "feature_0 / feature_1" (missing pl.col() wrapper)
+- "pl.col(feature_0)" (missing quotes around column name)
 
 Rules:
 - Maximum 15 candidates. Quality over quantity.
 - Every source_column must exist in the schema.
 - Do NOT suggest target encoding — this is handled separately.
 - Do NOT suggest lag features for non-time-series competitions.
-- expression must be implementable in Polars with basic operations.
+- expression MUST be a valid Polars expression string, not natural language.
 """
 
 
@@ -255,6 +280,7 @@ def _generate_round2_features(
             transform_type=item.get("transform_type", "domain"),
             description=item.get("expression", item.get("domain_rationale", "")),
             round=2,
+            expression=item.get("expression", ""),
         ))
 
     logger.info(f"[feature_factory] Round 2: {len(candidates)} domain feature candidates generated.")
@@ -584,6 +610,7 @@ def _generate_round5_hypothesis_features(
             description=f"Hypothesis test: {item.get('hypothesis_summary', '')}. "
                         f"Expression: {item.get('expression', '')}",
             round=5,
+            expression=item.get("expression", ""),
         ))
 
     logger.info(f"[feature_factory] Round 5a: {len(candidates)} hypothesis features.")
@@ -624,6 +651,7 @@ def _generate_round5_interaction_features(
                 transform_type=f"interaction_{op}",
                 description=f"Domain-guided interaction: {a} {op} {b}",
                 round=5,
+                expression=f"{a} * {b}" if op == "multiply" else f"{a} / ({b} + 1)" if op == "divide" else f"{a} + {b}",
             ))
 
     # Fill remaining with all top-K pairs not already covered
@@ -638,6 +666,7 @@ def _generate_round5_interaction_features(
                 transform_type="interaction_multiply",
                 description=f"Pairwise interaction: {a} * {b}",
                 round=5,
+                expression=f"{a} * {b}",
             ))
 
     logger.info(
@@ -891,177 +920,249 @@ def _build_feature_manifest(candidates: list[FeatureCandidate], schema: dict) ->
 
 # ── Main entry point ─────────────────────────────────────────────
 
+def _rewrite_llm_expression(expr_str: str, allowed_cols: set[str]) -> str:
+    """Safely upgrades simple algebraic equations to valid Polars strings."""
+    import ast
+    class PolarsRewriter(ast.NodeTransformer):
+        def visit_Name(self, node):
+            if node.id in allowed_cols:
+                return ast.Call(
+                    func=ast.Attribute(value=ast.Name(id="pl", ctx=ast.Load()), attr="col", ctx=ast.Load()),
+                    args=[ast.Constant(value=node.id)],
+                    keywords=[]
+                )
+            return node
+    try:
+        tree = ast.parse(expr_str, mode="eval")
+    except SyntaxError:
+        raise ValueError(f"Syntax error in expression: {expr_str}")
+
+    rewritten = PolarsRewriter().visit(tree)
+    ast.fix_missing_locations(rewritten)
+    # Wrap entire output inside parens to be safe
+    return f"({ast.unparse(rewritten)})"
+
 def run_feature_factory(state: ProfessorState) -> ProfessorState:
     """
     Feature Factory main node.
-    Rounds 1-5 + interaction budget cap + Wilcoxon gate + null importance.
+    Generates Rounds 1-5, applies AST transformations and Group aggregations, 
+    evaluates via Null Importance and Wilcoxon CV, and solidifies survivors into the TabularPreprocessor.
     """
+    import os
+    import math
+    import copy
+    from pathlib import Path
+    import polars as pl
+    import numpy as np
+    from core.preprocessor import TabularPreprocessor
+    from tools.data_tools import write_json
+    
     session_id = state["session_id"]
-
-    # Load schema (written by data_engineer)
-    schema_path = Path(f"outputs/{session_id}/schema.json")
-    if not schema_path.exists():
-        raise FileNotFoundError(
-            f"schema.json not found at {schema_path}. "
-            "data_engineer must run before feature_factory."
-        )
-    schema = json.loads(schema_path.read_text())
-
-    # Load competition_brief (written by competition_intel)
-    brief_path = Path(f"outputs/{session_id}/competition_brief.json")
-    competition_brief = json.loads(brief_path.read_text()) if brief_path.exists() else {}
-
-    # Generate candidates — all 5 rounds
+    output_dir = f"outputs/{session_id}"
+    clean_path = state.get("clean_data_path", "")
+    preprocessor_path = state.get("preprocessor_path", "")
+    schema_path = state.get("schema_path", "")
+    
+    logger.info(f"[FeatureFactory] Starting — session: {session_id}")
+    
+    if not os.path.exists(clean_path):
+        raise FileNotFoundError(f"clean_data_path missing: {clean_path}")
+    if not os.path.exists(preprocessor_path):
+        raise FileNotFoundError(f"preprocessor_path missing: {preprocessor_path}")
+    if not os.path.exists(schema_path):
+        raise FileNotFoundError(f"schema_path missing: {schema_path}")
+        
+    df = pl.read_parquet(clean_path)
+    schema = json.loads(Path(schema_path).read_text())
+    preprocessor = TabularPreprocessor.load(preprocessor_path)
+    
+    # ── Adapter: Convert modern flat schema into legacy hierarchical dicts ──
+    target_col = schema.get("target_col", "")
+    id_columns = schema.get("id_columns", [])
+    flat_cols = schema.get("columns", [])
+    if flat_cols and isinstance(flat_cols[0], str):
+        dict_cols = []
+        types_map = schema.get("types", {})
+        n_unique_map = schema.get("n_unique", {})
+        missing_map = schema.get("missing_rates", {})
+        for c_str in flat_cols:
+            dict_cols.append({
+                "name": c_str,
+                "dtype": types_map.get(c_str, "unknown"),
+                "n_unique": n_unique_map.get(c_str, "?"),
+                "missing_fraction": missing_map.get(c_str, 0.0),
+                "is_target": c_str == target_col,
+                "is_id": c_str in id_columns
+            })
+        schema["columns"] = dict_cols
+    
+    # Needs target for evaluation
+    target_col = schema.get("target_col", "")
+    y = df[target_col].to_numpy() if target_col in df.columns else None
+    
+    # Baseline dataframe (before any new features)
+    X_base = preprocessor.transform(df)
+    valid_cols = set(X_base.columns)
+    
+    # Generation Phases
     round1_candidates = _generate_round1_features(schema)
+    for c in round1_candidates:
+        src = c.source_columns[0]
+        if c.transform_type == "log":
+            c.expression = f"(pl.col('{src}').cast(pl.Float64).fill_null(0.0) + 1.0).log()"
+        elif c.transform_type == "sqrt":
+            c.expression = f"pl.col('{src}').cast(pl.Float64).fill_null(0.0).sqrt()"
+        elif c.transform_type == "missingness_flag":
+            c.expression = f"pl.col('{src}').is_null().cast(pl.Int8)"
+            
+    brief_path = state.get("competition_brief_path", "")
+    competition_brief = {}
+    if brief_path and os.path.exists(brief_path):
+        competition_brief = json.loads(Path(brief_path).read_text())
+        
     round2_candidates = _generate_round2_features(schema, competition_brief, state)
     round3_candidates = _generate_round3_aggregation_features(schema)
     round4_candidates = _generate_round4_target_encoding_candidates(schema)
-
-    # Round 5: interaction candidates receive top features from null importance
-    null_result = state.get("null_importance_result")
-    top_features_by_importance = (
-        null_result.survivors if null_result and hasattr(null_result, 'survivors') else
-        [c["name"] for c in schema.get("columns", [])
-         if not c.get("is_id") and not c.get("is_target")]
-    )
-
     round5a_candidates = _generate_round5_hypothesis_features(schema, competition_brief, state)
-    round5b_candidates = _generate_round5_interaction_features(
-        schema, competition_brief, top_features_by_importance
-    )
-    round5_candidates = round5a_candidates + round5b_candidates
-
-    all_candidates = (
-        round1_candidates + round2_candidates +
-        round3_candidates + round4_candidates +
-        round5_candidates
-    )
-
-    # Apply interaction budget cap
-    all_candidates = _apply_interaction_budget_cap_with_importance(
-        candidates=all_candidates,
-        null_importance_result=state.get("null_importance_result"),
-        meaningful_interactions=competition_brief.get("meaningful_interactions", []),
-        max_cap=MAX_INTERACTION_CANDIDATES,
-    )
-
-    logger.info(
-        f"[feature_factory] Candidates: R1={len(round1_candidates)} R2={len(round2_candidates)} "
-        f"R3={len(round3_candidates)} R4={len(round4_candidates)} "
-        f"R5a={len(round5a_candidates)} R5b={len(round5b_candidates)} "
-        f"total={len(all_candidates)}"
-    )
-
-    # Day 17: Statistical filtering (requires clean data)
-    gate_passed = []
-    gate_dropped = []
-    clean_path = state.get("clean_data_path", "")
-    target_col = state.get("target_column", "")
-
-    if clean_path and Path(clean_path).exists() and target_col:
-        try:
-            df = (pl.read_parquet(clean_path) if clean_path.endswith(".parquet")
-                  else pl.read_csv(clean_path))
-            y = df[target_col].to_numpy()
-
-            # Apply Round 1 transforms
-            X = _apply_round1_transforms(df, round1_candidates)
-
-            # Wilcoxon gate for Round 2 candidates only
-            # Round 1 (log, sqrt, missingness) skip gate — low-risk transforms
-            for c in round2_candidates:
-                cols_present = all(s in X.columns for s in c.source_columns)
-                if not cols_present:
-                    c.verdict = "DROP"
-                    gate_dropped.append(c.name)
-                    continue
-                X_base = X.drop(c.name) if c.name in X.columns else X
-                X_with = X_base  # Round 2 features aren't applied yet; use base
-                passed = _evaluate_candidate_feature(
-                    state, X_base, X_base, y, c.name,
-                    skip_wilcoxon_gate=False,
-                )
-                if passed:
-                    gate_passed.append(c.name)
-                else:
-                    gate_dropped.append(c.name)
-                    c.verdict = "DROP"
-
-            # Null importance filter on kept features
-            kept_feature_names = (
-                [c.name for c in round1_candidates]
-                + gate_passed
-            )
-            # Only features that exist in X can be filtered
-            available_features = [f for f in kept_feature_names if f in X.columns]
-            if available_features:
-                survivors, state = _apply_null_importance_filter(
-                    state, X.select(available_features + [target_col]), y
-                )
-                survivor_set = set(survivors)
-            else:
-                survivor_set = set(kept_feature_names)
-
-            # Set verdicts
-            for c in all_candidates:
-                if c.verdict == "DROP":
-                    continue  # already dropped by Wilcoxon
-                if c.name in survivor_set or c.name not in available_features:
-                    c.verdict = "KEEP"
-                else:
-                    c.verdict = "DROP"
-
-        except Exception as e:
-            logger.warning(
-                f"[feature_factory] Statistical filtering failed: {e}. "
-                f"Using all candidates with KEEP verdict."
-            )
-            for c in all_candidates:
-                c.verdict = "KEEP"
-    else:
-        # No data available — keep Day 16 behavior
-        for c in all_candidates:
+    
+    schema_names = [c["name"] for c in schema.get("columns", []) if not c.get("is_id") and not c.get("is_target")]
+    round5b_candidates = _generate_round5_interaction_features(schema, competition_brief, top_features_by_importance=schema_names[:50])
+    
+    all_candidates = round1_candidates + round2_candidates + round3_candidates + round4_candidates + round5a_candidates + round5b_candidates
+    
+    # AST Pipeline (Rounds 1, 2, 5)
+    X_aug = X_base.clone()
+    valid_candidates = []
+    
+    # Apply AST expressions one-at-a-time for fault tolerance
+    for c in all_candidates:
+        if c.round in (1, 2, 5) and c.expression:
+            try:
+                safe_ast = _rewrite_llm_expression(c.expression, valid_cols)
+                expr_obj = eval(safe_ast, {"__builtins__": {}, "pl": pl, "np": np})
+                # Test that the expression actually evaluates on the dataframe
+                X_aug = X_aug.with_columns(expr_obj.alias(c.name))
+                c.expression = safe_ast
+                valid_candidates.append(c)
+            except Exception as e:
+                logger.warning(f"[FeatureFactory] Suppressed invalid AST round {c.round} feature {c.name}: {e}")
+                c.verdict = "DROP"
+        
+    # Group Aggregation Pipeline (Round 3)
+    c3_v = [c for c in round3_candidates if all(s in X_aug.columns for s in c.source_columns)]
+    if c3_v:
+        X_r3 = _apply_round3_transforms(X_base, c3_v)
+        survived_r3 = [c for c in c3_v if c.name in X_r3.columns]
+        if survived_r3:
+            X_aug = X_aug.hstack(X_r3.select([c.name for c in survived_r3]))
+            valid_candidates.extend(survived_r3)
+            
+    # Target Encoding Pipeline (Round 4)
+    c4_v = [c for c in round4_candidates if c.source_columns[0] in X_aug.columns]
+    if c4_v and y is not None:
+        X_r4 = _apply_round4_target_encoding(X_base, y, c4_v)
+        survived_r4 = [c for c in c4_v if c.name in X_r4.columns]
+        if survived_r4:
+            X_aug = X_aug.hstack(X_r4.select([c.name for c in survived_r4]))
+            valid_candidates.extend(survived_r4)
+            
+    # Budget Cap for R5 Interactions
+    valid_candidates = _apply_interaction_budget_cap(valid_candidates, valid_candidates)
+    aug_cols = {c.name for c in valid_candidates}
+    final_aug_cols = [c for c in X_aug.columns if c in aug_cols]
+    
+    # Evaluation Gates
+    survivors = set(final_aug_cols)
+    if y is not None and len(survivors) > 0:
+        survivor_list, temp_state = _apply_null_importance_filter(state, X_aug.select(final_aug_cols), y)
+        state.update(temp_state)
+        survivors = set(survivor_list)
+        
+    final_candidates = [c for c in valid_candidates if c.name in survivors]
+    
+    # Wilcoxon Gate + Solidification
+    added_features = []
+    X_current = X_base.clone()
+    
+    for c in final_candidates:
+        if y is None:
             c.verdict = "KEEP"
+            added_features.append(c)
+            X_current = X_current.hstack(X_aug.select([c.name]))
+            continue
+            
+        passes = _evaluate_candidate_feature(state, X_current, X_current.hstack(X_aug.select([c.name])), y, c.name)
+        if passes:
+            c.verdict = "KEEP"
+            added_features.append(c)
+            X_current = X_current.hstack(X_aug.select([c.name]))
+        else:
+            c.verdict = "DROP"
+            
+    # Solidify Keepers into TabularPreprocessor
+    for c in added_features:
+        if c.round in (1, 2, 5):
+            preprocessor.add_feature_expression(c.name, c.expression)
+        elif c.round == 3:
+            cat_col = c.source_columns[1]
+            num_col = c.source_columns[0]
+            fn_name = None
+            for fn in ROUND3_AGG_FUNCTIONS:
+                if f"_{fn}_by_" in c.name:
+                    fn_name = fn
+                    break
+            if fn_name is None: continue
+            
+            agg_expr = {"mean": pl.col(num_col).mean(), "std": pl.col(num_col).std(), "min": pl.col(num_col).min(), "max": pl.col(num_col).max(), "count": pl.col(num_col).count()}.get(fn_name)
+            if agg_expr is None: continue
+            
+            mapping_df = X_base.group_by(cat_col).agg(agg_expr.alias("val")).drop_nulls(cat_col)
+            mapping_dict = dict(zip(mapping_df[cat_col].to_list(), mapping_df["val"].to_list()))
+            default_val = float(mapping_df["val"].mean()) if len(mapping_df) > 0 else 0.0
+            preprocessor.add_group_mapping(c.name, cat_col, mapping_dict, default_val)
+            
+        elif c.round == 4:
+            col = c.source_columns[0]
+            global_mean = float(np.mean(y)) if y is not None else 0.0
+            smoothing = 30.0
+            mapping_df = X_base.with_columns(pl.Series("y", y)).group_by(col).agg([
+                pl.col("y").sum().alias("sum"), pl.col("y").count().alias("count")
+            ]).drop_nulls(col)
+            
+            mapping_dict = {}
+            for row in mapping_df.iter_rows(named=True):
+                cat_val = row[col]
+                count = row["count"]
+                sm_y = row["sum"]
+                sm_mean = sm_y / count if count > 0 else global_mean
+                mapping_dict[cat_val] = float(((count * sm_mean) + (smoothing * global_mean)) / (count + smoothing))
+            preprocessor.add_group_mapping(c.name, col, mapping_dict, global_mean)
+            
+    preprocessor.expected_columns = X_current.columns
+    feature_parquet_path = f"{output_dir}/features.parquet"
+    X_current.write_parquet(feature_parquet_path)
+    preprocessor.save(preprocessor_path)
 
-    kept_candidates = [c for c in all_candidates if c.verdict == "KEEP"]
-
-    # Write feature_manifest.json
-    manifest = _build_feature_manifest(kept_candidates, schema)
-    manifest_path = Path(f"outputs/{session_id}/feature_manifest.json")
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = _build_feature_manifest(all_candidates, schema)
+    manifest_path = Path(f"{output_dir}/feature_manifest.json")
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
+    logger.info(f"[FeatureFactory] Wired {len(added_features)} robust tested features into Preprocessor across 5 Rounds.")
+
+    from core.lineage import log_event
     log_event(
         session_id=session_id,
         agent="feature_factory",
         action="feature_factory_complete",
-        keys_read=["session_id"],
-        keys_written=["feature_manifest", "feature_candidates",
-                       "round1_features", "round2_features"],
-        values_changed={
-            "round1_candidates": len(round1_candidates),
-            "round2_candidates": len(round2_candidates),
-            "round3_candidates": len(round3_candidates),
-            "round4_candidates": len(round4_candidates),
-            "round5a_candidates": len(round5a_candidates),
-            "round5b_candidates": len(round5b_candidates),
-            "total_kept": len(kept_candidates),
-            "dropped": len(all_candidates) - len(kept_candidates),
-            "gate_passed": len(gate_passed),
-            "gate_dropped": len(gate_dropped),
-        },
+        keys_read=["clean_data_path", "preprocessor_path"],
+        keys_written=["feature_data_path", "feature_manifest", "preprocessor_path", "feature_order"],
+        values_changed={"added_features": len(added_features)},
     )
 
-    state = {
+    return {
         **state,
+        "feature_data_path": feature_parquet_path,
         "feature_manifest": manifest,
-        "feature_candidates": [c.name for c in kept_candidates],
-        "round1_features": [c.name for c in round1_candidates],
-        "round2_features": [c.name for c in round2_candidates],
-        "round3_features": [c.name for c in round3_candidates],
-        "round4_features": [c.name for c in round4_candidates],
-        "round5_features": [c.name for c in round5_candidates],
-        "features_gate_passed": gate_passed,
-        "features_gate_dropped": gate_dropped,
+        "feature_candidates": added_features,
+        "feature_order": list(X_current.columns),  # FIX: Write feature_order for pseudo_label_agent and submit
     }
-    return state

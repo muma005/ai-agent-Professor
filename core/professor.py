@@ -13,6 +13,22 @@ if _tracing_enabled:
 # Day 12: Default tracing sampling rate to 10% to save costs
 os.environ.setdefault("LANGCHAIN_TRACING_SAMPLING_RATE", os.getenv("LANGCHAIN_TRACING_SAMPLING_RATE", "0.10"))
 
+import random
+import numpy as np
+
+def _set_global_seed(seed=42):
+    """Enforce deterministic behaviour at process start."""
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+    except ImportError:
+        pass
+
+_set_global_seed(42)
+
 import pickle
 import contextlib
 import logging
@@ -32,6 +48,7 @@ from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 from agents.red_team_critic import run_red_team_critic
 from agents.feature_factory import run_feature_factory
+from agents.ensemble_architect import blend_models
 from agents.pseudo_label_agent import run_pseudo_label_agent
 from agents.supervisor import run_supervisor_replan, get_replan_target, MAX_REPLAN_ATTEMPTS, NODE_PRIORITY
 
@@ -61,12 +78,16 @@ def route_after_intel(state: ProfessorState) -> str:
 
 
 def route_after_data_engineer(state: ProfessorState) -> str:
-    """After Data Engineer: advance to EDA Agent."""
+    """After Data Engineer: run integrity gate, then advance to EDA Agent."""
+    from guards.pipeline_integrity import run_integrity_gate
+    run_integrity_gate(state, "POST_DATA_ENGINEER")
     return _advance_dag(state, current="data_engineer")
 
 
 def route_after_eda(state: ProfessorState) -> str:
-    """After EDA Agent: advance to Validation Architect."""
+    """After EDA Agent: run integrity gate, then advance to Validation Architect."""
+    from guards.pipeline_integrity import run_integrity_gate
+    run_integrity_gate(state, "POST_EDA")
     return _advance_dag(state, current="eda_agent")
 
 
@@ -78,9 +99,21 @@ def route_after_validation(state: ProfessorState) -> str:
     return _advance_dag(state, current="validation_architect")
 
 
+def route_after_feature_factory(state: ProfessorState) -> str:
+    """After Feature Factory: advance to ML Optimizer."""
+    return _advance_dag(state, current="feature_factory")
+
+
 def route_after_optimizer(state: ProfessorState) -> str:
-    """After Optimizer: advance to red_team_critic."""
+    """After Optimizer: run integrity gate, then advance to ensemble_architect."""
+    from guards.pipeline_integrity import run_integrity_gate
+    run_integrity_gate(state, "POST_MODEL")
     return _advance_dag(state, current="ml_optimizer")
+
+
+def route_after_ensemble(state: ProfessorState) -> str:
+    """After Ensemble Architect: advance to red_team_critic."""
+    return _advance_dag(state, current="ensemble_architect")
 
 
 def route_after_critic(state: ProfessorState) -> str:
@@ -218,7 +251,6 @@ def run_submit(state: ProfessorState) -> ProfessorState:
     """
     from tools.data_tools import read_csv, read_parquet, read_json
     from tools.submit_tools import generate_submission, save_submission_log
-    from agents.ml_optimizer import _identify_target_column
     from core.metric_contract import load_contract
     from core.lineage import log_event
 
@@ -229,15 +261,15 @@ def run_submit(state: ProfessorState) -> ProfessorState:
 
     print(f"[Submit] Generating submission -- session: {session_id}")
 
-    # ── Load test data ────────────────────────────────────────────
-    test_path   = state["raw_data_path"].replace("train.csv", "test.csv")
-    sample_path = state["raw_data_path"].replace("train.csv", "sample_submission.csv")
+    # ── Load test data (from paths set by data_engineer — no string replacement) ──
+    test_path   = state.get("test_data_path", "")
+    sample_path = state.get("sample_submission_path", "")
 
-    if not os.path.exists(test_path):
-        print(f"[Submit] WARNING: test.csv not found at {test_path}")
+    if not test_path or not os.path.exists(test_path):
+        print(f"[Submit] WARNING: test data not found at '{test_path}'")
         return {**state, "submission_path": None}
-    if not os.path.exists(sample_path):
-        print(f"[Submit] WARNING: sample_submission.csv not found at {sample_path}")
+    if not sample_path or not os.path.exists(sample_path):
+        print(f"[Submit] WARNING: sample_submission not found at '{sample_path}'")
         return {**state, "submission_path": None}
 
     test_df = read_csv(test_path)
@@ -250,42 +282,44 @@ def run_submit(state: ProfessorState) -> ProfessorState:
     with open(model_path, "rb") as f:
         model = pickle.load(f)
 
-    # ── Prepare test features (same encoding as training) ────────
+    # ── Prepare test features (using schema authority — no guessing) ──
     schema     = read_json(state["schema_path"])
-    train_df   = read_parquet(state["clean_data_path"])
-    target_col = _identify_target_column(schema, state)
+    target_col = state["target_col"]
 
-    feature_cols = [c for c in train_df.columns
-                    if c != target_col and c in test_df.columns]
-    test_subset = test_df.select(feature_cols)
+    from core.preprocessor import TabularPreprocessor
+    preprocessor_path = f"{output_dir}/preprocessor.pkl"
+    if not os.path.exists(preprocessor_path):
+        raise ValueError("[Submit] TabularPreprocessor not found. Run Feature Factory first.")
+        
+    preprocessor = TabularPreprocessor.load(preprocessor_path)
+    test_features = preprocessor.transform(test_df)
 
-    for col in test_subset.columns:
-        if test_subset[col].dtype in (pl.Utf8, pl.String):
-            test_subset = test_subset.with_columns(
-                pl.col(col).cast(pl.Categorical).cast(pl.Int32)
-            )
-        elif test_subset[col].dtype == pl.Boolean:
-            test_subset = test_subset.with_columns(
-                pl.col(col).cast(pl.Int32)
-            )
-
-    for col in test_subset.select(cs.numeric()).columns:
-        test_subset = test_subset.with_columns(
-            pl.col(col).fill_null(0)
-        )
-
-    X_test = test_subset.to_numpy().astype(np.float64)
+    # Slice features using schema authority — no substring heuristics
+    id_cols = set(state.get("id_columns", []))
+    eda_drops = set(state.get("dropped_features", []))
+    feature_cols = [
+        c for c in test_features.columns
+        if c != target_col
+        and c not in id_cols
+        and c not in eda_drops
+    ]
+    
+    X_test = test_features.select(feature_cols).to_numpy().astype(np.float64)
 
     # ── Generate predictions ──────────────────────────────────────
     contract_path = f"{output_dir}/metric_contract.json"
     if os.path.exists(contract_path):
         contract = load_contract(contract_path)
         if contract.requires_proba:
-            preds = model.predict_proba(X_test)[:, 1]
+            probs = model.predict_proba(X_test)
+            if probs.shape[1] == 2:
+                preds = probs[:, 1]
+            else:
+                preds = probs
         else:
-            preds = model.predict(X_test).astype(float)
+            preds = model.predict(X_test)
     else:
-        preds = model.predict(X_test).astype(float)
+        preds = model.predict(X_test)
 
     # ── Generate + validate submission via submit_tools ────────────
     submission_path = f"{output_dir}/submission.csv"
@@ -351,6 +385,7 @@ def build_graph() -> StateGraph:
     graph.add_node("ml_optimizer",    run_ml_optimizer)
     graph.add_node("red_team_critic", run_red_team_critic)
     graph.add_node("feature_factory", run_feature_factory)
+    graph.add_node("ensemble_architect", blend_models)
     graph.add_node("supervisor_replan", run_supervisor_replan)
     graph.add_node("submit",          run_submit)
     graph.add_node("pseudo_label_agent", run_pseudo_label_agent)
@@ -367,6 +402,7 @@ def build_graph() -> StateGraph:
         "feature_factory":   "feature_factory",
         "ml_optimizer":      "ml_optimizer",
         "red_team_critic":   "red_team_critic",
+        "ensemble_architect": "ensemble_architect",
         "supervisor_replan": "supervisor_replan",
         "pseudo_label_agent": "pseudo_label_agent",
         "submit":            "submit",
@@ -410,6 +446,13 @@ def build_graph() -> StateGraph:
         _all_nodes,
     )
 
+    # Day 16: Ensemble Architect → advance to critic
+    graph.add_conditional_edges(
+        "ensemble_architect",
+        route_after_ensemble,
+        _all_nodes,
+    )
+
     # Day 11: Critic → conditional routing
     graph.add_conditional_edges(
         "red_team_critic",
@@ -417,8 +460,12 @@ def build_graph() -> StateGraph:
         _all_nodes,
     )
 
-    # Feature factory stub → advance to ml_optimizer
-    graph.add_edge("feature_factory", "ml_optimizer")
+    # Feature factory → conditional advance via DAG
+    graph.add_conditional_edges(
+        "feature_factory",
+        route_after_feature_factory,
+        _all_nodes,
+    )
 
     # Day 11: Supervisor replan → re-enter at earliest affected node
     graph.add_conditional_edges(
@@ -484,20 +531,29 @@ def _log_estimated_cost(state: ProfessorState) -> None:
     Rough cost estimate. Logged at end of each run.
     Formula: outer_nodes * avg_tokens_per_node * cost_per_1k_tokens
     """
-    OUTER_NODES = [
-        "semantic_router", "competition_intel", "data_engineer", "eda_agent",
-        "validation_architect", "feature_factory", "red_team_critic",
-        "ensemble_architect", "submission_strategist"
-    ]
-    AVG_TOKENS_PER_NODE = 3000
-    COST_PER_1K = 0.003  # claude-sonnet approximate
-
-    estimated_cost = len(OUTER_NODES) * AVG_TOKENS_PER_NODE * COST_PER_1K / 1000
+    tracker = state.get("cost_tracker", {})
+    budget = tracker.get("budget_usd", 0.0)
+    
+    in_tokens = tracker.get("groq_tokens_in", 0)
+    out_tokens = tracker.get("groq_tokens_out", 0)
+    
+    # very rough standard cost
+    current_cost = (in_tokens * 0.003 / 1000) + (out_tokens * 0.015 / 1000)
+    
     print(
-        f"[Professor] Estimated LLM cost this run: ${estimated_cost:.4f} "
-        f"(outer pipeline only, Optuna tracing disabled). "
+        f"[Professor] Actual tracked token cost this run: ${current_cost:.4f} "
+        f"(Optuna tracing disabled/exempt). "
         f"Adjust LANGCHAIN_TRACING_SAMPLING_RATE in .env to change trace coverage."
     )
+
+    if budget > 0:
+        ratio = current_cost / budget
+        if ratio >= tracker.get("triage_threshold", 0.95):
+            logger.error(f"[Budget] CRITICAL: Budget usage {ratio:.1%} exceeds hitl threshold! Halt recommended.")
+        elif ratio >= tracker.get("throttle_threshold", 0.85):
+            logger.warning(f"[Budget] THROTTLE: Budget usage {ratio:.1%} exceeds throttle threshold.")
+        elif ratio >= tracker.get("warning_threshold", 0.70):
+            logger.warning(f"[Budget] WARNING: Budget usage {ratio:.1%} exceeds warning threshold.")
 
 
 # ── Day 15: LangFuse observability ─────────────────────────────────
@@ -597,9 +653,17 @@ def run_professor(state: ProfessorState) -> ProfessorState:
     competition_name = state.get("competition_name", "unknown")
 
     with _langfuse_trace(session_id, competition_name) as trace:
-        state = {**state, "_langfuse_trace": trace}
+        # NOTE: trace is NOT injected into state (non-serializable)
         graph = get_graph()
         result = graph.invoke(state)
+
+    # ── Capture final LLM Tokens ───────────────────────────────────
+    from tools.llm_client import get_token_usage
+    usage = get_token_usage()
+    cost_tracker = dict(result.get("cost_tracker", {}))
+    cost_tracker["groq_tokens_in"] = usage.get("prompt", 0)
+    cost_tracker["groq_tokens_out"] = usage.get("completion", 0)
+    result["cost_tracker"] = cost_tracker
 
     _log_estimated_cost(result)
     return result

@@ -65,7 +65,7 @@ def _run_stage1_permutation_filter(
     X_np = X.select(feature_names).to_numpy()
 
     lgb_params = {
-        "objective":     "binary" if task_type == "binary" else "regression",
+        "objective":     "multiclass" if task_type == "multiclass" else "binary" if task_type == "binary" else "regression",
         "n_estimators":  100,
         "num_leaves":    31,
         "learning_rate": 0.1,
@@ -74,7 +74,7 @@ def _run_stage1_permutation_filter(
     }
 
     # Train on REAL y first — get actual importances
-    model_real = (lgb.LGBMClassifier(**lgb_params) if task_type == "binary"
+    model_real = (lgb.LGBMClassifier(**lgb_params) if task_type in ("binary", "multiclass")
                   else lgb.LGBMRegressor(**lgb_params))
     model_real.fit(X_np, y)
     actual_importances = dict(
@@ -89,7 +89,7 @@ def _run_stage1_permutation_filter(
 
     for _ in range(n_shuffles):
         y_shuffled = rng.permutation(y)
-        model_null = (lgb.LGBMClassifier(**lgb_params) if task_type == "binary"
+        model_null = (lgb.LGBMClassifier(**lgb_params) if task_type in ("binary", "multiclass")
                       else lgb.LGBMRegressor(**lgb_params))
         model_null.fit(X_np, y_shuffled)
         for f, imp in zip(feature_names, model_null.feature_importances_):
@@ -125,19 +125,27 @@ def _run_stage1_permutation_filter(
 STAGE2_SCRIPT_TEMPLATE = '''
 import json
 import gc
-import sys
 import numpy as np
 import lightgbm as lgb
+import os
 
-X_np          = np.array({X_list})
-y             = np.array({y_list})
+try:
+    data = np.load("{data_path}")
+    X_np = data["X"]
+    y = data["y"]
+except Exception as e:
+    # Print error to stderr and exit with error code
+    import sys
+    print(json.dumps({{"error": f"Failed to load data: {{e}}" }}), file=sys.stderr)
+    sys.exit(1)
+
 feature_names = {feature_names}
 n_shuffles    = {n_shuffles}
 task_type     = "{task_type}"
 random_seed   = {random_seed}
 
 lgb_params = {{
-    "objective":     "binary" if task_type == "binary" else "regression",
+    "objective":     "multiclass" if task_type == "multiclass" else "binary" if task_type == "binary" else "regression",
     "n_estimators":  200,
     "num_leaves":    31,
     "learning_rate": 0.05,
@@ -145,7 +153,7 @@ lgb_params = {{
     "n_jobs":        1,
 }}
 
-ModelClass = lgb.LGBMClassifier if task_type == "binary" else lgb.LGBMRegressor
+ModelClass = lgb.LGBMClassifier if task_type in ("binary", "multiclass") else lgb.LGBMRegressor
 
 # Actual importances (real y)
 model_real = ModelClass(**lgb_params)
@@ -167,6 +175,8 @@ for i in range(n_shuffles):
     del model_null
     gc.collect()
     if (i + 1) % 10 == 0:
+        # Print progress to stderr
+        import sys
         print(f"Progress: {{i+1}}/{{n_shuffles}} shuffles complete", file=sys.stderr, flush=True)
 
 result = {{
@@ -195,12 +205,15 @@ def _run_stage2_null_importance_persistent_sandbox(
     Returns:
       (stage2_survivors, stage2_dropped, null_distributions, threshold_percentiles)
     """
-    X_list = X_survivors.select(survivor_names).to_numpy().tolist()
-    y_list = y.tolist()
+    import tempfile
+    import os
+    import time
+    
+    tmp_path = os.path.join(tempfile.gettempdir(), f"null_imp_stage2_{int(time.time())}.npz")
+    np.savez(tmp_path, X=X_survivors.select(survivor_names).to_numpy(), y=y)
 
     script = STAGE2_SCRIPT_TEMPLATE.format(
-        X_list=json.dumps(X_list),
-        y_list=json.dumps(y_list),
+        data_path=tmp_path.replace("\\", "/"),
         feature_names=json.dumps(survivor_names),
         n_shuffles=n_shuffles,
         task_type=task_type,
@@ -226,6 +239,13 @@ def _run_stage2_null_importance_persistent_sandbox(
         )
         return survivor_names, [], {f: [] for f in survivor_names}, {}
 
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
     if result.get("returncode", -1) != 0 or result.get("timed_out", False):
         logger.warning(
             f"[NullImportance] Stage 2 sandbox failed "
@@ -238,6 +258,9 @@ def _run_stage2_null_importance_persistent_sandbox(
 
     try:
         payload = json.loads(result["stdout"].strip())
+        if "error" in payload:
+            logger.warning(f"[NullImportance] Sandbox script returned error: {payload['error']}")
+            return survivor_names, [], {f: [] for f in survivor_names}, {}
         actual_importances = payload["actual_importances"]
         null_distributions = payload["null_distributions"]
     except (json.JSONDecodeError, KeyError) as e:

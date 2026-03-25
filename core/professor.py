@@ -33,6 +33,7 @@ import pickle
 import contextlib
 import logging
 import threading
+import traceback
 import numpy as np
 import polars as pl
 import polars.selectors as cs
@@ -40,6 +41,15 @@ from typing import Optional
 from datetime import datetime, timezone
 from langgraph.graph import StateGraph, END
 from core.state import ProfessorState
+
+# ── Phase 1 Imports: Core Stability ────────────────────────────────
+from core.error_context import ErrorContextManager
+from core.checkpoint import save_node_checkpoint, load_last_checkpoint
+from core.circuit_breaker import llm_circuit_breaker, CircuitBreakerError
+from core.timeout import timeout
+from tools.prediction_validator import validate_predictions
+
+# ── Agent Imports ──────────────────────────────────────────────────
 from agents.semantic_router import run_semantic_router
 from agents.competition_intel import run_competition_intel
 from agents.data_engineer import run_data_engineer
@@ -647,24 +657,116 @@ def _trace_node(trace, node_name: str, input_summary: dict, output_summary: dict
 
 # ── Convenience runner ────────────────────────────────────────────
 
-def run_professor(state: ProfessorState) -> ProfessorState:
-    """Run the full Professor graph from an initial state. Uses cached graph."""
+class ProfessorPipelineError(Exception):
+    """Custom exception for pipeline failures with context."""
+    def __init__(self, message, node=None, state_snapshot=None):
+        super().__init__(message)
+        self.node = node
+        self.state_snapshot = state_snapshot
+        self.timestamp = datetime.now(timezone.utc).isoformat()
+
+
+def run_professor(
+    state: ProfessorState,
+    resume_from: str = None,
+    timeout_seconds: int = 600,
+) -> ProfessorState:
+    """
+    Run the full Professor graph with comprehensive error handling,
+    checkpointing, and timeout.
+    
+    Args:
+        state: Initial ProfessorState
+        resume_from: Path to checkpoint to resume from (optional)
+        timeout_seconds: Maximum execution time (default: 10 minutes)
+    
+    Returns:
+        Final ProfessorState
+    
+    Raises:
+        ProfessorPipelineError: If pipeline fails
+    """
     session_id = state.get("session_id", "unknown")
     competition_name = state.get("competition_name", "unknown")
-
-    with _langfuse_trace(session_id, competition_name) as trace:
-        # NOTE: trace is NOT injected into state (non-serializable)
-        graph = get_graph()
-        result = graph.invoke(state)
-
-    # ── Capture final LLM Tokens ───────────────────────────────────
-    from tools.llm_client import get_token_usage
-    usage = get_token_usage()
-    cost_tracker = dict(result.get("cost_tracker", {}))
-    cost_tracker["groq_tokens_in"] = usage.get("prompt", 0)
-    cost_tracker["groq_tokens_out"] = usage.get("completion", 0)
-    result["cost_tracker"] = cost_tracker
-
-    _log_estimated_cost(result)
-    return result
+    
+    # Initialize error context manager
+    error_context = ErrorContextManager(session_id)
+    
+    # Resume from checkpoint if provided
+    if resume_from and os.path.exists(resume_from):
+        logger.info(f"Resuming from checkpoint: {resume_from}")
+        checkpoint = load_last_checkpoint(session_id)
+        if checkpoint:
+            state.update(checkpoint["state"])
+            state["resumed_from_checkpoint"] = resume_from
+    
+    try:
+        # Start error context tracking
+        error_context.start()
+        logger.info(f"[Professor] Starting pipeline — session: {session_id}")
+        
+        # Run with timeout
+        with timeout(timeout_seconds, "Pipeline execution"):
+            with _langfuse_trace(session_id, competition_name) as trace:
+                # NOTE: trace is NOT injected into state (non-serializable)
+                graph = get_graph()
+                result = graph.invoke(state)
+        
+        # ── Capture final LLM Tokens ───────────────────────────────
+        from tools.llm_client import get_token_usage
+        usage = get_token_usage()
+        cost_tracker = dict(result.get("cost_tracker", {}))
+        cost_tracker["groq_tokens_in"] = usage.get("prompt", 0)
+        cost_tracker["groq_tokens_out"] = usage.get("completion", 0)
+        result["cost_tracker"] = cost_tracker
+        
+        _log_estimated_cost(result)
+        
+        # Mark success
+        error_context.success()
+        logger.info(f"[Professor] Pipeline completed successfully — session: {session_id}")
+        
+        return result
+        
+    except CircuitBreakerError as e:
+        # API circuit breaker opened
+        error_context.record_error(e, traceback_str=traceback.format_exc())
+        error_context.fail()
+        
+        # Save failure checkpoint
+        save_node_checkpoint(state, session_id, "FAILURE")
+        
+        raise ProfessorPipelineError(
+            f"API circuit breaker opened: {e}",
+            node="circuit_breaker",
+            state_snapshot=state
+        ) from e
+        
+    except TimeoutError as e:
+        # Pipeline timeout
+        error_context.record_error(e, traceback_str=traceback.format_exc())
+        error_context.fail()
+        
+        # Save failure checkpoint
+        save_node_checkpoint(state, session_id, "FAILURE")
+        
+        raise ProfessorPipelineError(
+            f"Pipeline timeout: {e}",
+            node="timeout",
+            state_snapshot=state
+        ) from e
+        
+    except Exception as e:
+        # General pipeline failure
+        error_context.record_error(e, node=error_context.context.get("current_node"), traceback_str=traceback.format_exc())
+        error_context.fail()
+        
+        # Save failure checkpoint for recovery
+        save_node_checkpoint(state, session_id, "FAILURE")
+        
+        raise ProfessorPipelineError(
+            f"Pipeline failed: {e}",
+            node=error_context.context.get("current_node"),
+            state_snapshot=state
+        ) from e
 

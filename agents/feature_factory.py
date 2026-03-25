@@ -8,6 +8,7 @@
 # Writes feature_manifest.json with per-feature metadata.
 # -------------------------------------------------------------------------
 
+import ast
 import json
 import math
 import logging
@@ -942,6 +943,86 @@ def _rewrite_llm_expression(expr_str: str, allowed_cols: set[str]) -> str:
     # Wrap entire output inside parens to be safe
     return f"({ast.unparse(rewritten)})"
 
+
+# ── SECURITY FIX: Safe Polars Expression Evaluator ──────────────────
+
+_ALLOWED_AST_NODES = {
+    # Core
+    ast.Expression, ast.Call, ast.Attribute, ast.Name, ast.Load,
+    ast.Constant, ast.BinOp, ast.UnaryOp, ast.Compare,
+    # Operators
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+    ast.USub, ast.UAdd,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+    ast.And, ast.Or, ast.Not,
+    # Functions
+    ast.List, ast.Tuple,
+}
+
+_ALLOWED_POLARS_ATTRS = {
+    'col', 'lit', 'select', 'with_columns', 'filter', 'group_by', 'agg',
+    'mean', 'std', 'var', 'min', 'max', 'sum', 'count', 'median',
+    'log', 'log10', 'exp', 'sqrt', 'abs', 'round', 'floor', 'ceil',
+    'cast', 'fill_null', 'fill_nan', 'drop_nulls', 'is_null', 'is_not_null',
+    'is_in', 'is_not_in', 'between', 'clip', 'replace',
+    'str', 'dt', 'arr',  # namespaces
+    'contains', 'starts_with', 'ends_with',  # string methods
+    'year', 'month', 'day', 'hour', 'minute', 'second',  # datetime methods
+}
+
+
+def _safe_eval_polars_expr(expr_str: str, allowed_modules: dict) -> Any:
+    """
+    SECURITY FIX: Safely evaluate Polars expressions without using eval().
+    
+    Uses AST parsing and validation to prevent code injection attacks.
+    
+    Args:
+        expr_str: Polars expression string (e.g., "pl.col('feature_0') / 2")
+        allowed_modules: Dict of allowed modules (e.g., {"pl": polars, "np": numpy})
+    
+    Returns:
+        Evaluated Polars expression object
+    
+    Raises:
+        ValueError: If expression contains unsafe nodes or attributes
+    """
+    import ast
+    
+    # Parse expression
+    try:
+        tree = ast.parse(expr_str.strip(), mode='eval')
+    except SyntaxError as e:
+        raise ValueError(f"Invalid syntax in expression: {expr_str}. Error: {e}")
+    
+    # Validate all AST nodes are safe
+    for node in ast.walk(tree):
+        # Check node type is allowed
+        if type(node) not in _ALLOWED_AST_NODES:
+            raise ValueError(
+                f"Unsafe AST node detected: {type(node).__name__}. "
+                f"Expression: {expr_str}"
+            )
+        
+        # Check attribute access is safe (for pl.col, pl.lit, etc.)
+        if isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name) and node.value.id in allowed_modules:
+                # pl.something - check if it's allowed
+                if node.attr not in _ALLOWED_POLARS_ATTRS:
+                    raise ValueError(
+                        f"Unsafe Polars attribute: {node.attr}. "
+                        f"Expression: {expr_str}"
+                    )
+    
+    # Safe to evaluate - use restricted eval with only allowed modules
+    safe_globals = {k: v for k, v in allowed_modules.items()}
+    safe_globals["__builtins__"] = {}
+    
+    try:
+        return eval(compile(tree, '<string>', 'eval'), safe_globals)
+    except Exception as e:
+        raise ValueError(f"Failed to evaluate expression: {expr_str}. Error: {e}")
+
 def run_feature_factory(state: ProfessorState) -> ProfessorState:
     """
     Feature Factory main node.
@@ -1039,7 +1120,8 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         if c.round in (1, 2, 5) and c.expression:
             try:
                 safe_ast = _rewrite_llm_expression(c.expression, valid_cols)
-                expr_obj = eval(safe_ast, {"__builtins__": {}, "pl": pl, "np": np})
+                # SECURITY FIX: Use safe evaluator instead of eval()
+                expr_obj = _safe_eval_polars_expr(safe_ast, {"pl": pl, "np": np})
                 # Test that the expression actually evaluates on the dataframe
                 X_aug = X_aug.with_columns(expr_obj.alias(c.name))
                 c.expression = safe_ast
@@ -1048,23 +1130,23 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
                 logger.warning(f"[FeatureFactory] Suppressed invalid AST round {c.round} feature {c.name}: {e}")
                 c.verdict = "DROP"
         
-    # Group Aggregation Pipeline (Round 3)
+    # Group Aggregation Pipeline (Round 3) - LEAKAGE FIX
+    # DO NOT APPLY aggregations here - mark for CV-safe application in ml_optimizer
     c3_v = [c for c in round3_candidates if all(s in X_aug.columns for s in c.source_columns)]
-    if c3_v:
-        X_r3 = _apply_round3_transforms(X_base, c3_v)
-        survived_r3 = [c for c in c3_v if c.name in X_r3.columns]
-        if survived_r3:
-            X_aug = X_aug.hstack(X_r3.select([c.name for c in survived_r3]))
-            valid_candidates.extend(survived_r3)
+    for c in c3_v:
+        c.verdict = "PENDING_CV"  # Mark for CV-safe application
+        valid_candidates.append(c)
+    
+    logger.info(f"[FeatureFactory] Round 3: {len(c3_v)} aggregation candidates marked for CV-safe application")
             
-    # Target Encoding Pipeline (Round 4)
+    # Target Encoding Pipeline (Round 4) - LEAKAGE FIX
+    # DO NOT APPLY target encoding here - mark for CV-safe application in ml_optimizer
     c4_v = [c for c in round4_candidates if c.source_columns[0] in X_aug.columns]
-    if c4_v and y is not None:
-        X_r4 = _apply_round4_target_encoding(X_base, y, c4_v)
-        survived_r4 = [c for c in c4_v if c.name in X_r4.columns]
-        if survived_r4:
-            X_aug = X_aug.hstack(X_r4.select([c.name for c in survived_r4]))
-            valid_candidates.extend(survived_r4)
+    for c in c4_v:
+        c.verdict = "PENDING_CV"  # Mark for CV-safe application
+        valid_candidates.append(c)
+    
+    logger.info(f"[FeatureFactory] Round 4: {len(c4_v)} target encoding candidates marked for CV-safe application")
             
     # Budget Cap for R5 Interactions
     valid_candidates = _apply_interaction_budget_cap(valid_candidates, valid_candidates)

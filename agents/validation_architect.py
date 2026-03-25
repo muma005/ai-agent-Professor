@@ -9,6 +9,7 @@ from core.metric_contract import build_metric_contract, save_contract
 from tools.data_tools import read_json
 from core.lineage import log_event
 from guards.agent_retry import with_agent_retry
+from tools.performance_monitor import timed_node
 
 
 _CV_STRATEGY_RULES = {
@@ -29,8 +30,12 @@ def _detect_group_column(schema: dict) -> Optional[str]:
     group_keywords = ["group", "patient", "user_id", "customer_id",
                       "store_id", "site_id", "subject", "household"]
     for col in schema.get("columns", []):
-        if any(kw in col.lower() for kw in group_keywords):
-            return col
+        try:
+            col_name = str(col.get("name", "")) if isinstance(col, dict) else str(col)
+        except Exception:
+            continue
+        if any(kw in col_name.lower() for kw in group_keywords):
+            return col_name
     return None
 
 
@@ -106,6 +111,7 @@ def _detect_cv_mismatch_risk(
     return None
 
 
+@timed_node
 @with_agent_retry("ValidationArchitect")
 def run_validation_architect(state: ProfessorState) -> ProfessorState:
     """

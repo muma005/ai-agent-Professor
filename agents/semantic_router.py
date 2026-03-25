@@ -1,6 +1,7 @@
 # agents/semantic_router.py
 
 from core.state import ProfessorState
+from tools.performance_monitor import timed_node
 
 
 # ── v0 linear route ───────────────────────────────────────────────
@@ -12,11 +13,14 @@ LINEAR_ROUTE_V0 = [
     "data_engineer",
     "eda_agent",
     "validation_architect",
+    "feature_factory",
     "ml_optimizer",
+    "red_team_critic",
     "submit",
 ]
 
 
+@timed_node
 def run_semantic_router(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: Semantic Router v0.

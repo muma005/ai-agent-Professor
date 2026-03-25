@@ -252,7 +252,10 @@ def _intelligence_fan_join(state: ProfessorState) -> ProfessorState:
 
 # -- Submit node --- validated submission via submit_tools ----------------
 
+from tools.performance_monitor import timed_node
 
+
+@timed_node
 def run_submit(state: ProfessorState) -> ProfessorState:
     """
     Submit node: generates validated submission.csv using submit_tools.

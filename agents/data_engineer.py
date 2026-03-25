@@ -10,6 +10,7 @@ from tools.e2b_sandbox import execute_code, SandboxExecutionError
 from tools.llm_client import call_llm
 from tools.data_tools import hash_dataset, ensure_session_dirs
 from guards.agent_retry import with_agent_retry
+from tools.performance_monitor import timed_node
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,7 @@ def _check_external_data(state: ProfessorState) -> ProfessorState:
 
 
 # ── Main agent function (LangGraph node) ─────────────────────────
+@timed_node
 @with_agent_retry("DataEngineer")
 def run_data_engineer(state: ProfessorState) -> ProfessorState:
     """
@@ -268,9 +270,13 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
     # ── 5. Serialize Outputs ──────────────────────────────────────
     parquet_path = f"{output_dir}/cleaned.parquet"
     preprocessor_path = f"{output_dir}/preprocessor.pkl"
+    preprocessor_config_path = f"{output_dir}/preprocessor_config.json"
 
     df_clean.write_parquet(parquet_path)
     preprocessor.save(preprocessor_path)
+    
+    # LEAKAGE FIX: Save preprocessor config separately for CV-safe reconstruction
+    preprocessor.save_config(preprocessor_config_path)
 
     # Profile the clean data to write the final schema.json
     clean_schema = profile_data(df_clean)
@@ -310,15 +316,16 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
     # ── Return updated state ──────────────────────────────────────
     return {
         **state,
-        "clean_data_path":         parquet_path,
-        "schema_path":             schema_path,
-        "preprocessor_path":       preprocessor_path,
-        "data_hash":               data_hash,
-        "target_col":              target_col,
-        "id_columns":              id_columns,
-        "task_type":               task_type,
-        "test_data_path":          test_data_path,
-        "sample_submission_path":  sample_submission_path,
-        "cost_tracker":            cost_tracker,
+        "clean_data_path":            parquet_path,
+        "schema_path":                schema_path,
+        "preprocessor_path":          preprocessor_path,
+        "preprocessor_config_path":   preprocessor_config_path,
+        "data_hash":                  data_hash,
+        "target_col":                 target_col,
+        "id_columns":                 id_columns,
+        "task_type":                  task_type,
+        "test_data_path":             test_data_path,
+        "sample_submission_path":     sample_submission_path,
+        "cost_tracker":               cost_tracker,
     }
 

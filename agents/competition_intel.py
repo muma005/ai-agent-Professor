@@ -11,6 +11,7 @@ from core.state import ProfessorState
 from tools.llm_client import call_llm
 from core.lineage import log_event
 from guards.agent_retry import with_agent_retry
+from tools.performance_monitor import timed_node
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ def _synthesize_brief(notebooks: list, competition: str) -> dict:
     }
 
 
+@timed_node
 @with_agent_retry("CompetitionIntel")
 def run_competition_intel(state: ProfessorState) -> ProfessorState:
     """
@@ -238,64 +240,27 @@ Do NOT invent sources. Only recommend sources you are confident exist.
 
 def run_external_data_scout(state: ProfessorState) -> ProfessorState:
     """
-    Searches for relevant external data sources.
-    Only runs if external_data_allowed=True.
-    Writes external_data_manifest.json.
-    Never blocks the pipeline — returns empty manifest on any failure.
+    Stubbed External Data Scout.
+    Phase 3: Prevent hallucinated sources and wasted LLM tokens.
+    Returns an explicitly empty manifest to ensure pipeline stability.
     """
-    if not state.get("external_data_allowed", False):
-        logger.info("[competition_intel] External data not allowed — scout skipped.")
-        empty_manifest = {"external_sources": [], "total_sources_found": 0}
-        state = {**state, "external_data_manifest": empty_manifest}
-        _write_manifest(state, empty_manifest)
-        return state
-
-    competition_brief = state.get("competition_brief", {})
-    prompt = EXTERNAL_DATA_PROMPT.format(
-        competition_name=state.get("competition_name", "unknown"),
-        task_type=competition_brief.get("task_type", "unknown"),
-        target_description=competition_brief.get("target_description", "unknown"),
-        domain=competition_brief.get("domain", "unknown"),
-        feature_summary=", ".join(state.get("feature_names", [])[:20]),
-    )
-
+    logger.info("[competition_intel] External data scout stubbed for Phase 3. Returning empty manifest.")
+    
+    empty_manifest = {
+        "external_sources": [],
+        "total_sources_found": 0,
+        "recommended_sources": [],
+        "scout_notes": "External data scout explicitly disabled to prevent hallucinations."
+    }
+    
     try:
-        response = call_llm(prompt, "Return only valid JSON.", model="deepseek")
-        start = response.find("{")
-        end = response.rfind("}")
-        if start == -1 or end == -1:
-            raise ValueError("No JSON found in LLM response")
-        manifest = json.loads(response[start:end + 1])
-
-        # Coerce relevance_score to float
-        for source in manifest.get("external_sources", []):
-            source["relevance_score"] = float(source.get("relevance_score", 0))
-
-        _validate_manifest_schema(manifest)
-
-        # Filter recommended_sources to only high-relevance (>= 0.6)
-        source_names = {s["name"] for s in manifest.get("external_sources", [])
-                        if s.get("relevance_score", 0) >= 0.6}
-        manifest["recommended_sources"] = [
-            name for name in manifest.get("recommended_sources", [])
-            if name in source_names
-        ]
-        manifest["total_sources_found"] = len(manifest.get("external_sources", []))
-
+        path = Path(f"outputs/{state['session_id']}/external_data_manifest.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(empty_manifest, indent=2))
     except Exception as e:
-        logger.warning(f"[competition_intel] External data scout failed: {e}. Returning empty manifest.")
-        manifest = {
-            "external_sources": [],
-            "total_sources_found": 0,
-            "scout_error": str(e)[:200],
-        }
+        logger.warning(f"[competition_intel] Could not write manifest: {e}")
 
-    _write_manifest(state, manifest)
-    state = {**state, "external_data_manifest": manifest}
-
-    n = manifest.get("total_sources_found", 0)
-    logger.info(f"[competition_intel] External data scout complete: {n} sources found.")
-    return state
+    return {**state, "external_data_manifest": empty_manifest}
 
 
 def _validate_manifest_schema(manifest: dict) -> None:

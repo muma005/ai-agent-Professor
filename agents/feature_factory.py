@@ -25,6 +25,7 @@ from core.lineage import log_event
 from tools.llm_client import call_llm
 from tools.wilcoxon_gate import feature_gate_result, is_feature_worth_adding
 from tools.null_importance import run_null_importance_filter
+from tools.performance_monitor import timed_node
 
 logger = logging.getLogger(__name__)
 
@@ -1023,6 +1024,7 @@ def _safe_eval_polars_expr(expr_str: str, allowed_modules: dict) -> Any:
     except Exception as e:
         raise ValueError(f"Failed to evaluate expression: {expr_str}. Error: {e}")
 
+@timed_node
 def run_feature_factory(state: ProfessorState) -> ProfessorState:
     """
     Feature Factory main node.

@@ -20,6 +20,7 @@ import numpy as np
 from core.state import ProfessorState
 from core.lineage import log_event
 from guards.circuit_breaker import get_escalation_level, handle_escalation, reset_failure_count
+from tools.performance_monitor import timed_node
 
 logger       = logging.getLogger(__name__)
 AGENT_NAME   = "red_team_critic"
@@ -59,12 +60,18 @@ def _check_shuffled_target(
         model  = RandomForestClassifier(n_estimators=30, max_depth=4, random_state=42, n_jobs=-1)
         try:
             scores = cross_val_score(model, X_np, y_shuffled, cv=3, scoring="roc_auc")
-        except ValueError:
+        except ValueError as e:
             # fallback for multiclass without proper AUC support
-            scores = cross_val_score(model, X_np, y_shuffled, cv=3, scoring="accuracy")
+            try:
+                scores = cross_val_score(model, X_np, y_shuffled, cv=3, scoring="accuracy")
+            except Exception as e_inner:
+                return {"verdict": "CRITICAL", "auc_shuffled": None, "evidence": f"Crash in shuffled target eval: {e_inner}"}
     else:
         model  = RandomForestRegressor(n_estimators=30, max_depth=4, random_state=42, n_jobs=-1)
-        scores = cross_val_score(model, X_np, y_shuffled, cv=3, scoring="r2")
+        try:
+            scores = cross_val_score(model, X_np, y_shuffled, cv=3, scoring="r2")
+        except Exception as e_inner:
+            return {"verdict": "CRITICAL", "auc_shuffled": None, "evidence": f"Crash in shuffled target eval: {e_inner}"}
 
     mean_score = float(np.mean(scores))
     threshold  = 0.55 if target_type in ("binary", "multiclass") else 0.10
@@ -123,10 +130,16 @@ def _check_id_only_model(
         try:
             scores = cross_val_score(model, X_id, y, cv=3, scoring="roc_auc")
         except ValueError:
-            scores = cross_val_score(model, X_id, y, cv=3, scoring="accuracy")
+            try:
+                scores = cross_val_score(model, X_id, y, cv=3, scoring="accuracy")
+            except Exception as e_inner:
+                return {"verdict": "CRITICAL", "auc_id_only": None, "evidence": f"Crash in ID eval: {e_inner}"}
     else:
         model  = GradientBoostingRegressor(n_estimators=20, max_depth=2, random_state=42)
-        scores = cross_val_score(model, X_id, y, cv=3, scoring="r2")
+        try:
+            scores = cross_val_score(model, X_id, y, cv=3, scoring="r2")
+        except Exception as e_inner:
+            return {"verdict": "CRITICAL", "auc_id_only": None, "evidence": f"Crash in ID eval: {e_inner}"}
 
     mean_score = float(np.mean(scores))
     threshold  = 0.65
@@ -443,7 +456,7 @@ def _noise_injection_check(
         with open(model_path, "rb") as f:
             model = pickle.load(f)
     except Exception as e:
-        return {"verdict": "OK", "note": f"Could not load model: {e}"}
+        return {"verdict": "CRITICAL", "evidence": f"Could not load model: {e}"}
 
     numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
                       pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
@@ -468,8 +481,8 @@ def _noise_injection_check(
     try:
         clean_probs = model.predict_proba(X_np)[:, 1]
         clean_auc = roc_auc_score(y_true, clean_probs)
-    except Exception:
-        return {"verdict": "OK", "note": "Could not compute clean AUC"}
+    except Exception as e:
+        return {"verdict": "CRITICAL", "evidence": f"Could not compute clean AUC: {e}"}
 
     # Noisy score
     rng = np.random.default_rng(42)
@@ -483,8 +496,8 @@ def _noise_injection_check(
     try:
         noisy_probs = model.predict_proba(X_noisy)[:, 1]
         noisy_auc = roc_auc_score(y_true, noisy_probs)
-    except Exception:
-        return {"verdict": "OK", "note": "Could not compute noisy AUC"}
+    except Exception as e:
+        return {"verdict": "CRITICAL", "evidence": f"Could not compute noisy AUC: {e}"}
 
     if clean_auc > 0:
         degradation = (clean_auc - noisy_auc) / clean_auc
@@ -539,8 +552,8 @@ def _slice_performance_check(
     try:
         with open(model_path, "rb") as f:
             model = pickle.load(f)
-    except Exception:
-        return {"verdict": "OK", "note": "Could not load model"}
+    except Exception as e:
+        return {"verdict": "CRITICAL", "evidence": f"Could not load model: {e}"}
 
     numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
                       pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
@@ -552,8 +565,8 @@ def _slice_performance_check(
 
     try:
         y_prob = model.predict_proba(X_np)[:, 1]
-    except Exception:
-        return {"verdict": "OK", "note": "Could not get predictions for slice audit"}
+    except Exception as e:
+        return {"verdict": "CRITICAL", "evidence": f"Could not get predictions for slice audit: {e}"}
 
     y_arr = np.array(y_true)
     slices = []
@@ -726,20 +739,20 @@ def _check_robustness(
     try:
         sub_results["noise_injection"] = _noise_injection_check(X_train, y_true, model_registry)
     except Exception as e:
-        logger.warning(f"[{AGENT_NAME}] noise_injection sub-check failed: {e}")
-        sub_results["noise_injection"] = {"verdict": "OK", "note": f"Error: {e}"}
+        logger.error(f"[{AGENT_NAME}] noise_injection sub-check failed: {e}")
+        sub_results["noise_injection"] = {"verdict": "CRITICAL", "note": f"Error: {e}", "evidence": f"Crash in noise_injection_check: {e}"}
 
     try:
         sub_results["slice_audit"] = _slice_performance_check(X_train, y_true, model_registry)
     except Exception as e:
-        logger.warning(f"[{AGENT_NAME}] slice_audit sub-check failed: {e}")
-        sub_results["slice_audit"] = {"verdict": "OK", "note": f"Error: {e}"}
+        logger.error(f"[{AGENT_NAME}] slice_audit sub-check failed: {e}")
+        sub_results["slice_audit"] = {"verdict": "CRITICAL", "note": f"Error: {e}", "evidence": f"Crash in slice_performance_check: {e}"}
 
     try:
         sub_results["calibration"] = _calibration_check(y_true, y_prob)
     except Exception as e:
-        logger.warning(f"[{AGENT_NAME}] calibration sub-check failed: {e}")
-        sub_results["calibration"] = {"verdict": "OK", "note": f"Error: {e}"}
+        logger.error(f"[{AGENT_NAME}] calibration sub-check failed: {e}")
+        sub_results["calibration"] = {"verdict": "CRITICAL", "note": f"Error: {e}", "evidence": f"Crash in calibration_check: {e}"}
 
     # Overall = max severity across sub-checks
     overall = max(
@@ -899,6 +912,7 @@ def _overall_severity(findings: list) -> str:
     )
 
 
+@timed_node
 def run_red_team_critic(state: ProfessorState) -> ProfessorState:
     """LangGraph node -- inner retry loop."""
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -929,11 +943,12 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
     logger.info(f"[{AGENT_NAME}] Starting -- session: {session_id}, attempt: {attempt}")
 
     # -- Load data ---------------------------------------------------------------
-    raw_data_path = state.get("raw_data_path", "")
-    if not raw_data_path or not os.path.exists(raw_data_path):
-        raise ValueError(f"[{AGENT_NAME}] raw_data_path missing or not found: {raw_data_path}")
+    # -- Load data ---------------------------------------------------------------
+    feature_data_path = state.get("feature_data_path", "")
+    if not feature_data_path or not os.path.exists(feature_data_path):
+        raise ValueError(f"[{AGENT_NAME}] feature_data_path missing or not found: {feature_data_path}")
 
-    df = pl.read_csv(raw_data_path, infer_schema_length=10000)
+    df = pl.read_parquet(feature_data_path)
 
     schema      = {}
     schema_path = state.get("schema_path", "")
@@ -951,12 +966,15 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
     oof_path = state.get("oof_predictions_path", "")
     if oof_path and os.path.exists(oof_path):
         try:
-            oof_df = pl.read_csv(oof_path)
-            prob_col = [c for c in oof_df.columns if "prob" in c.lower() or "pred" in c.lower()]
-            if prob_col:
-                y_prob = oof_df[prob_col[0]].to_numpy()
+            if str(oof_path).endswith(".npy"):
+                y_prob = np.load(oof_path)
+            else:
+                oof_df = pl.read_csv(oof_path)
+                prob_col = [c for c in oof_df.columns if "prob" in c.lower() or "pred" in c.lower()]
+                if prob_col:
+                    y_prob = oof_df[prob_col[0]].to_numpy()
         except Exception as e:
-            logger.warning(f"[{AGENT_NAME}] Could not load OOF predictions: {e}")
+            logger.error(f"[{AGENT_NAME}] Could not load OOF predictions from {oof_path}: {e}")
 
     # -- Load test data if available ---------------------------------------------
     test_df = None

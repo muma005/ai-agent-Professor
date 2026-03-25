@@ -26,6 +26,7 @@ from core.metric_contract import (
 )
 from tools.data_tools import read_parquet, read_json
 from guards.agent_retry import with_agent_retry
+from tools.performance_monitor import timed_node
 
 logger = logging.getLogger(__name__)
 
@@ -1205,6 +1206,7 @@ def run_optimization(
     return study
 
 
+@timed_node
 @with_agent_retry("MLOptimizer")
 def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     """

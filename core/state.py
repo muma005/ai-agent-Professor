@@ -67,6 +67,7 @@ class ProfessorState(TypedDict):
     eda_report: dict
     schema_path: Optional[str]
     preprocessor_path: Optional[str]
+    preprocessor_config_path: Optional[str]  # LEAKAGE FIX: For CV-safe preprocessor reconstruction
     data_hash: str     # SHA-256 of source file, first 16 chars
 
     # ── Schema Authority (Phase 0) — single source of truth ───────
@@ -197,6 +198,9 @@ class ProfessorState(TypedDict):
     pseudo_labels_applied: bool
     pseudo_label_cv_improvement: float
 
+    # -- Performance Monitoring (FLAW-6.1) -------------------------
+    performance_log: Annotated[Optional[list], _replace]  # timing info per node
+
     # -- External Data Scout (Day 15) ------------------------------
     external_data_allowed: bool
     external_data_manifest: dict
@@ -241,6 +245,7 @@ def initial_state(
         eda_report={},
         schema_path=None,
         preprocessor_path=None,
+        preprocessor_config_path=None,
         data_hash="",
         # -- Schema Authority (Phase 0) --
         target_col="",

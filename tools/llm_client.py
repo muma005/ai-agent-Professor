@@ -1,12 +1,24 @@
 # tools/llm_client.py
 
 import os
+import logging
 from dotenv import load_dotenv
 from openai import OpenAI
 import google.generativeai as genai
 import json
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+class TokenTracker:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+global_tracker = TokenTracker()
+
+def get_token_usage() -> dict:
+    return {"prompt": global_tracker.prompt_tokens, "completion": global_tracker.completion_tokens}
 
 # ── Clients ───────────────────────────────────────────────────────
 _fireworks_deepseek_client = None
@@ -48,6 +60,113 @@ INCORRECT: pd.read_csv()  df.to_parquet()     df.fillna()     df.groupby()
 If pandas is required for a specific library call:
   convert back with pl.from_pandas(df) before returning.
 """
+
+
+# ── FLAW-2.3 FIX: LLM Output Validation ──────────────────────────
+
+class LLMOutputValidationError(Exception):
+    """Raised when LLM output validation fails."""
+    pass
+
+
+def validate_llm_output(output: str, expected_type: str = "text") -> bool:
+    """
+    Validate LLM output before using it.
+    
+    Args:
+        output: Raw LLM output
+        expected_type: "text", "json", "code", "list"
+    
+    Returns:
+        True if valid
+    
+    Raises:
+        LLMOutputValidationError if invalid
+    """
+    if not output or not output.strip():
+        raise LLMOutputValidationError("Empty output")
+    
+    if expected_type == "json":
+        try:
+            # Try to extract JSON
+            start = output.find("{")
+            end = output.rfind("}")
+            if start == -1 or end == -1:
+                raise LLMOutputValidationError("No JSON object found")
+            
+            json.loads(output[start:end+1])
+            return True
+            
+        except json.JSONDecodeError as e:
+            raise LLMOutputValidationError(f"Invalid JSON: {e}")
+    
+    elif expected_type == "code":
+        # Check for suspicious patterns FIRST
+        suspicious = ["__import__", "eval(", "exec(", "subprocess", "os.system"]
+        for pattern in suspicious:
+            if pattern in output:
+                raise LLMOutputValidationError(f"Suspicious code pattern: {pattern}")
+        
+        # Check for common code patterns
+        if not any(pattern in output for pattern in ["def ", "import ", "class ", "return "]):
+            raise LLMOutputValidationError("No code detected")
+        
+        return True
+    
+    elif expected_type == "list":
+        # Try to extract list
+        start = output.find("[")
+        end = output.rfind("]")
+        if start == -1 or end == -1:
+            raise LLMOutputValidationError("No list found")
+        
+        return True
+    
+    return True  # text is always valid
+
+
+def call_llm_validated(
+    prompt: str,
+    expected_type: str = "text",
+    max_retries: int = 3,
+    **kwargs
+) -> str:
+    """
+    Call LLM with output validation and retry logic.
+    
+    Args:
+        prompt: Prompt to send
+        expected_type: Expected output type
+        max_retries: Maximum retry attempts
+        **kwargs: Passed to call_llm
+    
+    Returns:
+        Validated LLM output
+    
+    Raises:
+        LLMOutputValidationError if validation fails after retries
+    """
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            output = call_llm(prompt, **kwargs)
+            validate_llm_output(output, expected_type)
+            return output
+            
+        except LLMOutputValidationError as e:
+            last_error = e
+            logger.warning(
+                f"LLM output validation failed (attempt {attempt+1}/{max_retries}): {e}"
+            )
+            
+            # Retry with validation hint
+            prompt = f"{prompt}\n\nNOTE: Output must be valid {expected_type}. Please retry."
+    
+    raise LLMOutputValidationError(
+        f"LLM output validation failed after {max_retries} retries: {last_error}"
+    )
+
 
 # ── Main call function ────────────────────────────────────────────
 def call_llm(
@@ -118,6 +237,9 @@ def _call_fireworks_deepseek(prompt: str, system: str, max_tokens: int) -> str:
         max_tokens=max_tokens,
         temperature=0.1
     )
+    if hasattr(response, "usage") and response.usage:
+        global_tracker.prompt_tokens += getattr(response.usage, "prompt_tokens", 0)
+        global_tracker.completion_tokens += getattr(response.usage, "completion_tokens", 0)
     return response.choices[0].message.content
 
 
@@ -133,6 +255,9 @@ def _call_fireworks_glm(prompt: str, system: str, max_tokens: int) -> str:
         max_tokens=max_tokens,
         temperature=0.1
     )
+    if hasattr(response, "usage") and response.usage:
+        global_tracker.prompt_tokens += getattr(response.usage, "prompt_tokens", 0)
+        global_tracker.completion_tokens += getattr(response.usage, "completion_tokens", 0)
     return response.choices[0].message.content
 
 
@@ -143,4 +268,7 @@ def _call_gemini(prompt: str, system: str, max_tokens: int) -> str:
         full_prompt,
         generation_config={"max_output_tokens": max_tokens, "temperature": 0.1}
     )
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        global_tracker.prompt_tokens += getattr(response.usage_metadata, "prompt_token_count", 0)
+        global_tracker.completion_tokens += getattr(response.usage_metadata, "candidates_token_count", 0)
     return response.text

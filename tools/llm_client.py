@@ -20,6 +20,64 @@ global_tracker = TokenTracker()
 def get_token_usage() -> dict:
     return {"prompt": global_tracker.prompt_tokens, "completion": global_tracker.completion_tokens}
 
+
+# ── FLAW-8.1: API Response Validation ────────────────────────────
+
+class APIResponseValidator:
+    """Validates API responses for quality and safety."""
+    
+    @staticmethod
+    def validate_response(response: str, model: str) -> dict:
+        """
+        Validate API response.
+        
+        Args:
+            response: API response text
+            model: Model that generated response
+        
+        Returns:
+            Validation result dict
+        """
+        issues = []
+        warnings = []
+        
+        # Check for empty response
+        if not response or not response.strip():
+            issues.append("Empty response")
+        
+        # Check for error patterns
+        error_patterns = [
+            "error:", "failed:", "exception:", "traceback:",
+            "rate limit", "quota exceeded", "unauthorized",
+        ]
+        
+        response_lower = response.lower()
+        for pattern in error_patterns:
+            if pattern in response_lower:
+                warnings.append(f"Contains error pattern: '{pattern}'")
+        
+        # Check for hallucinated API keys (security)
+        key_patterns = [
+            "sk-", "api_key=", "apikey=", "secret=",
+            "FIREWORKS", "GEMINI", "GROQ",
+        ]
+        
+        for pattern in key_patterns:
+            if pattern in response:
+                issues.append(f"Potential API key leakage: '{pattern}'")
+        
+        # Check response length
+        if len(response) > 100000:  # 100K chars
+            warnings.append(f"Unusually long response: {len(response)} chars")
+        
+        return {
+            "valid": len(issues) == 0,
+            "issues": issues,
+            "warnings": warnings,
+            "model": model,
+            "response_length": len(response),
+        }
+
 # ── Clients ───────────────────────────────────────────────────────
 _fireworks_deepseek_client = None
 _fireworks_glm_client = None
@@ -192,11 +250,18 @@ def call_llm(
     # ── Fireworks: DeepSeek ────────────────────────────────────────
     if model == "deepseek":
         try:
-            return _call_fireworks_deepseek(
+            response = _call_fireworks_deepseek(
                 prompt=prompt,
                 system=system,
                 max_tokens=max_tokens
             )
+            # FLAW-8.1: Validate response
+            validation = APIResponseValidator.validate_response(response, model)
+            if not validation["valid"]:
+                logger.warning(f"[LLM] Response validation issues: {validation['issues']}")
+            if validation["warnings"]:
+                logger.debug(f"[LLM] Response warnings: {validation['warnings']}")
+            return response
         except Exception as e:
             print(f"[llm_client] Fireworks DeepSeek failed: {e}. Falling back to Gemini.")
             return _call_gemini(prompt, system, max_tokens)

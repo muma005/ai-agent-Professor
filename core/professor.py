@@ -13,21 +13,12 @@ if _tracing_enabled:
 # Day 12: Default tracing sampling rate to 10% to save costs
 os.environ.setdefault("LANGCHAIN_TRACING_SAMPLING_RATE", os.getenv("LANGCHAIN_TRACING_SAMPLING_RATE", "0.10"))
 
-import random
-import numpy as np
+# FLAW-10.1: Centralized seed management
+from tools.seed_manager import initialize_seeds, get_seed_manager
+_seed_manager = initialize_seeds(seed=42)  # Configurable via PROFESSOR_SEED env var
 
-def _set_global_seed(seed=42):
-    """Enforce deterministic behaviour at process start."""
-    random.seed(seed)
-    np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    try:
-        import torch
-        torch.manual_seed(seed)
-    except ImportError:
-        pass
-
-_set_global_seed(42)
+# FLAW-10.2: Reproducibility checks
+from tools.reproducibility import log_reproducibility_summary, generate_reproducibility_report
 
 import pickle
 import contextlib
@@ -708,6 +699,16 @@ def run_professor(
         error_context.start()
         logger.info(f"[Professor] Starting pipeline — session: {session_id}")
         
+        # FLAW-10.1: Log seed configuration
+        seed_info = _seed_manager.to_dict()
+        logger.info(
+            f"[Professor] Seed configuration: base={seed_info['base_seed']}, "
+            f"python={seed_info['python_seed']}, numpy={seed_info['numpy_seed']}"
+        )
+        
+        # FLAW-10.2: Log reproducibility summary
+        log_reproducibility_summary(state)
+
         # Run with timeout
         with timeout(timeout_seconds, "Pipeline execution"):
             with _langfuse_trace(session_id, competition_name) as trace:
@@ -724,11 +725,20 @@ def run_professor(
         result["cost_tracker"] = cost_tracker
         
         _log_estimated_cost(result)
-        
+
         # Mark success
         error_context.success()
         logger.info(f"[Professor] Pipeline completed successfully — session: {session_id}")
         
+        # FLAW-10.2: Generate reproducibility report
+        output_dir = f"outputs/{session_id}"
+        try:
+            report_path = generate_reproducibility_report(result, output_dir)
+            result["reproducibility_report_path"] = report_path
+            logger.info(f"[Professor] Reproducibility report: {report_path}")
+        except Exception as e:
+            logger.warning(f"[Professor] Failed to generate reproducibility report: {e}")
+
         return result
         
     except CircuitBreakerError as e:

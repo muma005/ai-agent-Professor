@@ -1,0 +1,126 @@
+# Pylint configuration for Professor project
+# Balances code quality with practical development needs
+
+[MASTER]
+# Files to analyze
+jobs=0
+
+# Files or directories to ignore
+ignore=.git,__pycache__,.pytest_cache,.mypy_cache,venv,.venv
+
+# Use multiple processes
+jobs=0
+
+[MESSAGES CONTROL]
+# Disable specific messages
+disable=
+    # Too many arguments (common in data processing)
+    too-many-arguments,
+    # Too many locals (common in complex functions)
+    too-many-locals,
+    # Too many branches (common in validation code)
+    too-many-branches,
+    # Too many statements (common in pipeline code)
+    too-many-statements,
+    # Too many instance attributes (common in dataclasses)
+    too-many-instance-attributes,
+    # Missing docstring in module (we document at class level)
+    missing-module-docstring,
+    # Missing docstring in function (we document at class level)
+    missing-function-docstring,
+    # Line too long (handled by Black)
+    line-too-long,
+    # Fixme comments (we use TODO intentionally)
+    fixme,
+    # Duplicate code (some duplication is acceptable)
+    duplicate-code,
+    # No member in type (false positives with dynamic code)
+    no-member,
+    # Not callable (false positives with decorators)
+    not-callable,
+
+[REPORTS]
+# Output format
+output-format=colorized
+
+# Score
+score=yes
+
+# Reports
+reports=no
+
+[FORMAT]
+# Maximum line length
+max-line-length=100
+
+# Indentation string
+indent-string='    '
+
+# Maximum number of lines in a module
+max-module-lines=1000
+
+[DESIGN]
+# Maximum number of arguments for function / method
+max-args=10
+
+# Maximum number of locals for function / method body
+max-locals=20
+
+# Maximum number of return / yield for function / method body
+max-returns=6
+
+# Maximum number of branch for function / method body
+max-branches=15
+
+# Maximum number of statements in function / method body
+max-statements=60
+
+# Maximum number of attributes for a class
+max-attributes=20
+
+# Minimum number of public methods for a class
+min-public-methods=1
+
+# Maximum number of public methods for a class
+max-public-methods=50
+
+# Maximum number of parents for a class
+max-parents=7
+
+# Minimum number of statements for a function to be considered complex
+min-similarity-lines=6
+
+[TYPECHECK]
+# List of class names for which member access should not raise errors
+ignored-classes=
+    collections.OrderedDict,
+    collections.namedtuple,
+    collections.defaultdict,
+
+# List of members which are set dynamically
+generated-members=
+    request.*,
+    response.*,
+
+[BASIC]
+# Good variable names
+good-names=
+    i,j,k,
+    x,y,z,
+    df,
+    X,y,
+    id,
+    _
+
+# Bad variable names
+bad-names=
+    foo,
+    bar,
+    baz,
+    toto,
+    tutu,
+    tata
+
+[STRING]
+# Check strings that are used as exceptions
+check-str-concat-over-line-jumps=yes

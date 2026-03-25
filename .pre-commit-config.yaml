@@ -1,17 +1,113 @@
-# .pre-commit-config.yaml
+# Pre-commit configuration for Professor project
+# Enforces code quality, style, and security checks
+
 repos:
+  # ── Black: Code Formatting ──────────────────────────────────────
+  - repo: https://github.com/psf/black
+    rev: 24.3.0
+    hooks:
+      - id: black
+        language_version: python3.11
+        args: [--line-length=100, --target-version=py311]
+
+  # ── isort: Import Sorting ───────────────────────────────────────
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: [--profile=black, --line-length=100]
+
+  # ── flake8: Style Guide Enforcement ─────────────────────────────
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        args: [--max-line-length=100, --max-complexity=10, --extend-ignore=E203]
+        additional_dependencies:
+          - flake8-bugbear
+          - flake8-comprehensions
+          - flake8-docstrings
+
+  # ── pylint: Code Quality ────────────────────────────────────────
+  - repo: https://github.com/PyCQA/pylint
+    rev: v3.1.0
+    hooks:
+      - id: pylint
+        args: [--rcfile=.pylintrc, --output-format=colorized]
+        additional_dependencies:
+          - pylint
+
+  # ── mypy: Static Type Checking ──────────────────────────────────
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.9.0
+    hooks:
+      - id: mypy
+        args: [--config-file=mypy.ini, --pretty]
+        additional_dependencies:
+          - types-requests
+          - types-PyYAML
+          - types-setuptools
+        exclude: ^tests/
+
+  # ── Security: Bandit ────────────────────────────────────────────
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.8
+    hooks:
+      - id: bandit
+        args: [-r, -ll, -ii]  # Low severity, low confidence
+        exclude: ^tests/
+
+  # ── Security: Safety (Dependency Vulnerabilities) ───────────────
+  - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
+    rev: v1.3.1
+    hooks:
+      - id: python-safety-dependencies-check
+        files: requirements.txt
+
+  # ── Secret Detection: Detect AWS/GCP/Azure Keys ─────────────────
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: .*/tests/.*|.*\.lock|\.env
+
+  # ── YAML Linting ────────────────────────────────────────────────
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: [-d, relaxed]
+
+  # ── JSON Linting ────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-json
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  # ── pytest: Run Tests on Commit ─────────────────────────────────
   - repo: local
     hooks:
-      - id: contract-tests
-        name: Contract tests
-        entry: pytest tests/contracts/ -x -q --tb=short
+      - id: pytest
+        name: pytest
+        entry: pytest
         language: system
         pass_filenames: false
-        stages: [commit]
+        always_run: true
+        args: [tests/, -v, --tb=short]
 
-      - id: regression-tests
-        name: Regression suite
-        entry: pytest tests/regression/ -x -q --tb=short
+  # ── Coverage: Ensure Test Coverage ──────────────────────────────
+  - repo: local
+    hooks:
+      - id: coverage
+        name: coverage
+        entry: coverage run -m pytest tests/
         language: system
         pass_filenames: false
-        stages: [commit]
+        always_run: true
+        stages: [push]

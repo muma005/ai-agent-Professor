@@ -19,6 +19,7 @@ import lightgbm as lgb
 from core.state import ProfessorState
 from core.lineage import log_event
 from datetime import datetime
+from typing import Optional
 from core.metric_contract import (
     MetricContract, default_contract,
     save_contract, load_contract, contract_to_prompt_snippet
@@ -605,6 +606,117 @@ def train_with_fallback(X, y, params, primary_model_type, fallback_chain=None):
     raise ProfessorModelTrainingError(
         f"All models failed: {model_chain}. Last error: {last_error}"
     )
+
+
+# ── FLAW-11.6 FIX: Overfitting Detection ─────────────────────────
+
+def detect_overfitting(
+    train_score: float,
+    cv_score: float,
+    threshold: float = 0.1,
+) -> tuple[bool, float]:
+    """
+    Detect overfitting by comparing train and CV scores.
+    
+    Args:
+        train_score: Training score
+        cv_score: Cross-validation score
+        threshold: Maximum acceptable gap (default: 0.1 = 10%)
+    
+    Returns:
+        (is_overfitting, gap)
+    """
+    gap = train_score - cv_score
+    
+    if gap > threshold:
+        logger.warning(
+            f"Overfitting detected! "
+            f"Train: {train_score:.4f}, CV: {cv_score:.4f}, Gap: {gap:.4f}"
+        )
+        return True, gap
+    
+    return False, gap
+
+
+def check_cv_lb_consistency(
+    cv_scores: list[float],
+    lb_score: Optional[float] = None,
+) -> bool:
+    """
+    Check if CV scores are consistent with LB score (if available).
+    
+    Args:
+        cv_scores: List of CV fold scores
+        lb_score: Leaderboard score (optional)
+    
+    Returns:
+        True if consistent
+    """
+    cv_mean = np.mean(cv_scores)
+    cv_std = np.std(cv_scores)
+    
+    if lb_score is not None:
+        # LB should be within 2 std of CV mean
+        if abs(lb_score - cv_mean) > 2 * cv_std:
+            logger.warning(
+                f"CV-LB inconsistency detected! "
+                f"CV: {cv_mean:.4f}±{cv_std:.4f}, LB: {lb_score:.4f}"
+            )
+            return False
+    
+    return True
+
+
+# ── FLAW-11.7 FIX: Model Stability Checks ────────────────────────
+
+def check_model_stability(
+    X: np.ndarray,
+    y: np.ndarray,
+    params: dict,
+    model_type: str,
+    n_seeds: int = 5,
+    max_std: float = 0.05,
+) -> tuple[bool, float, float]:
+    """
+    Check model stability across multiple random seeds.
+    
+    Args:
+        X: Features
+        y: Target
+        params: Model parameters
+        model_type: Model type
+        n_seeds: Number of seeds to test
+        max_std: Maximum acceptable standard deviation
+    
+    Returns:
+        (is_stable, mean_score, std_score)
+    """
+    from sklearn.model_selection import cross_val_score
+    
+    scores = []
+    
+    for seed in range(n_seeds):
+        model = _train_single_model(X, y, {**params, "random_state": seed}, model_type)
+        
+        # Quick CV to get score
+        cv_scores = cross_val_score(model, X, y, cv=3, scoring="roc_auc")
+        scores.append(np.mean(cv_scores))
+    
+    mean_score = np.mean(scores)
+    std_score = np.std(scores)
+    
+    if std_score > max_std:
+        logger.warning(
+            f"Model instability detected! "
+            f"Mean: {mean_score:.4f}, Std: {std_score:.4f} (max: {max_std})"
+        )
+        return False, mean_score, std_score
+    
+    logger.info(
+        f"Model stability verified: "
+        f"Mean: {mean_score:.4f}, Std: {std_score:.4f}"
+    )
+    return True, mean_score, std_score
 
 
 # ── CV helper for objective + stability ───────────────────────────
@@ -1281,6 +1393,30 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     # OOF predictions
     oof_preds = _get_oof_predictions(X_train_cv_np, y_train_cv, best_config, task_type, contract)
 
+    # ── FLAW-11.6: Overfitting Detection ──────────────────────────
+    # Estimate train score using the best model's performance on training data
+    # We use the mean of the training fold scores from Optuna trials as a proxy
+    train_score_proxy = None
+    for trial in completed:
+        if trial.params == best_config:
+            train_score_proxy = trial.user_attrs.get("train_score_mean")
+            break
+
+    overfitting_detected = False
+    overfitting_gap = None
+    if train_score_proxy is not None:
+        overfitting_detected, overfitting_gap = detect_overfitting(
+            train_score=train_score_proxy,
+            cv_score=cv_mean,
+            threshold=0.1  # 10% gap threshold
+        )
+        logger.info(
+            f"[Overfitting Check] Train: {train_score_proxy:.4f}, CV: {cv_mean:.4f}, "
+            f"Gap: {overfitting_gap:.4f}, Overfitting: {overfitting_detected}"
+        )
+    else:
+        logger.warning("[Overfitting Check] Train score not available, skipping overfitting detection")
+
     # ── Phase 4: Wilcoxon gate vs existing champion ───────────────
     existing_best = _get_existing_champion_scores(state)
     if existing_best:
@@ -1310,20 +1446,23 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     # ── Save metrics.json ─────────────────────────────────────────
     feature_order = list(feature_names)
     metrics = {
-        "scorer_name":    contract.scorer_name,
-        "direction":      direction,
-        "cv_mean":        cv_mean,
-        "cv_std":         cv_std,
-        "fold_scores":    fold_scores,
-        "n_folds":        n_folds,
-        "n_features":     len(feature_names),
-        "feature_names":  feature_names,
-        "feature_order":  feature_order,
-        "target_col":     target_col,
-        "n_rows":         len(X),
-        "model_type":     best_model_type,
-        "trained_at":     datetime.utcnow().isoformat(),
-        "data_hash":      state.get("data_hash", ""),
+        "scorer_name":          contract.scorer_name,
+        "direction":            direction,
+        "cv_mean":              cv_mean,
+        "cv_std":               cv_std,
+        "fold_scores":          fold_scores,
+        "n_folds":              n_folds,
+        "n_features":           len(feature_names),
+        "feature_names":        feature_names,
+        "feature_order":        feature_order,
+        "target_col":           target_col,
+        "n_rows":               len(X),
+        "model_type":           best_model_type,
+        "trained_at":           datetime.utcnow().isoformat(),
+        "data_hash":            state.get("data_hash", ""),
+        # FLAW-11.6: Overfitting detection results
+        "overfitting_detected": overfitting_detected,
+        "overfitting_gap":      overfitting_gap,
     }
     metrics_path = f"{output_dir}/metrics.json"
     with open(metrics_path, "w") as f:
@@ -1377,6 +1516,9 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "oof_predictions_path":  oof_path,
         "data_hash":             state.get("data_hash", ""),
         "scorer_name":           contract.scorer_name,
+        # FLAW-11.6: Overfitting detection results
+        "overfitting_detected":  overfitting_detected,
+        "overfitting_gap":       overfitting_gap,
     }
     registry_entry = _update_model_registry_with_calibration(registry_entry, calib_info)
 
@@ -1410,13 +1552,16 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         keys_read=["clean_data_path", "schema_path"],
         keys_written=["model_registry", "cv_mean", "oof_predictions_path"],
         values_changed={
-            "model_id":        model_id,
-            "cv_mean":         registry_entry["cv_mean"],
-            "cv_std":          registry_entry["cv_std"],
-            "stability_score": registry_entry["stability_score"],
-            "is_calibrated":   registry_entry["is_calibrated"],
-            "n_trials":        len(completed),
-            "top_k_rerun":     len(top_k_trials),
+            "model_id":             model_id,
+            "cv_mean":              registry_entry["cv_mean"],
+            "cv_std":               registry_entry["cv_std"],
+            "stability_score":      registry_entry["stability_score"],
+            "is_calibrated":        registry_entry["is_calibrated"],
+            "n_trials":             len(completed),
+            "top_k_rerun":          len(top_k_trials),
+            # FLAW-11.6: Overfitting detection results
+            "overfitting_detected": overfitting_detected,
+            "overfitting_gap":      overfitting_gap,
         },
     )
 

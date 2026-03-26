@@ -1232,7 +1232,8 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         raise ValueError("[MLOptimizer] schema_path not in state — run Data Engineer first")
 
     # Day 19 Fix: Read from the real finalized feature matrix, not the raw clean one
-    df     = read_parquet(state["feature_data_path"])
+    feature_data_path = state["feature_data_path"]  # FIX: Store as local variable for return
+    df     = read_parquet(feature_data_path)
     schema = read_json(state["schema_path"])
 
     print(f"[MLOptimizer] Data loaded: {df.shape}")

@@ -1,0 +1,6 @@
+{
+  "gate_passed": false,
+  "error": "TypeError: initial_state() got an unexpected keyword argument 'session_id'",
+  "session_id": "phase3_gate_1774256513",
+  "run_timestamp": "2026-03-23T09:01:53.057475"
+}

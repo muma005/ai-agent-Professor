@@ -1,0 +1,6 @@
+{
+  "gate_passed": false,
+  "error": "ModuleNotFoundError: No module named 'core'",
+  "session_id": "phase3_gate_1774256367",
+  "run_timestamp": "2026-03-23T08:59:27.607656"
+}

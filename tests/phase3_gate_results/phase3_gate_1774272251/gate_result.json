@@ -1,0 +1,6 @@
+{
+  "gate_passed": false,
+  "error": "RuntimeError: Kaggle submission failed:\n'kaggle' is not recognized as an internal or external command,\noperable program or batch file.\n\nCommon causes:\n  - Competition rules not accepted on kaggle.com\n  - submission.csv has wrong column names or format\n  - KAGGLE_USERNAME / KAGGLE_KEY not set correctly",
+  "session_id": "phase3_gate_1774272251",
+  "run_timestamp": "2026-03-23T14:19:19.476026"
+}

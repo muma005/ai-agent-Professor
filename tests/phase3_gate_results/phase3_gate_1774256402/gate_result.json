@@ -1,0 +1,6 @@
+{
+  "gate_passed": false,
+  "error": "KeyError: 'raw_data_path'",
+  "session_id": "phase3_gate_1774256402",
+  "run_timestamp": "2026-03-23T09:00:43.788578"
+}

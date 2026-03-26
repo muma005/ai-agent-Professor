@@ -1,0 +1,6 @@
+{
+  "gate_passed": false,
+  "error": "FileNotFoundError: [WinError 2] The system cannot find the file specified",
+  "session_id": "phase3_gate_1774257555",
+  "run_timestamp": "2026-03-23T09:42:15.114464"
+}

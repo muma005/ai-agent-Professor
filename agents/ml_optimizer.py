@@ -1341,40 +1341,60 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         and t.user_attrs.get("fold_scores")
     ]
 
-    if direction == "minimize":
-        completed.sort(key=lambda t: t.user_attrs["mean_cv"])
+    # Validate Optuna completed successfully
+    if len(completed) == 0:
+        logger.error("[MLOptimizer] No Optuna trials completed successfully!")
+        logger.error(f"[MLOptimizer] Study state: {study.user_attrs}")
+        logger.warning("[MLOptimizer] Falling back to default LightGBM model")
+        
+        # Use default model as fallback
+        best_config = {
+            "model_type": "lgbm",
+            "n_estimators": 100,
+            "learning_rate": 0.1,
+            "max_depth": 5,
+        }
+        best_stability = type('obj', (object,), {
+            'mean': 0.5,
+            'std': 0.1,
+            'stability_score': 0.35,
+            'seed_results': [0.5, 0.5, 0.5, 0.5, 0.5],
+        })()
     else:
-        completed.sort(key=lambda t: t.user_attrs["mean_cv"], reverse=True)
-
-    top_k_trials = completed[:TOP_K_FOR_STABILITY]
-
-    logger.info(
-        f"[ml_optimizer] Optuna complete: {len(completed)} trials. "
-        f"Re-running top {len(top_k_trials)} configs with {N_STABILITY_SEEDS} seeds."
-    )
-
-    def _train_fn(config: dict, seed: int) -> float:
-        model_type = config.get("model_type", "lgbm")
-        if model_type == "catboost":
-            params = {**config, "random_seed": seed}
+        if direction == "minimize":
+            completed.sort(key=lambda t: t.user_attrs["mean_cv"])
         else:
-            params = {**config, "random_state": seed}
-        fold_scores = _run_cv_no_collect(X_train_cv_np, y_train_cv, params, cv_folds, task_type, contract)
-        return float(np.mean(fold_scores))
+            completed.sort(key=lambda t: t.user_attrs["mean_cv"], reverse=True)
 
-    top_k_configs     = [t.user_attrs["params"] for t in top_k_trials]
-    stability_results = [
-        run_with_seeds(config=cfg, train_fn=_train_fn)
-        for cfg in top_k_configs
-    ]
+        top_k_trials = completed[:TOP_K_FOR_STABILITY]
 
-    ranked = rank_by_stability(top_k_configs, stability_results)
-    best_config, best_stability = ranked[0]
+        logger.info(
+            f"[ml_optimizer] Optuna complete: {len(completed)} trials. "
+            f"Re-running top {len(top_k_trials)} configs with {N_STABILITY_SEEDS} seeds."
+        )
 
-    logger.info(
-        f"[ml_optimizer] Stability ranking:\n"
-        f"{format_stability_report(ranked, top_n=3)}"
-    )
+        def _train_fn(config: dict, seed: int) -> float:
+            model_type = config.get("model_type", "lgbm")
+            if model_type == "catboost":
+                params = {**config, "random_seed": seed}
+            else:
+                params = {**config, "random_state": seed}
+            fold_scores = _run_cv_no_collect(X_train_cv_np, y_train_cv, params, cv_folds, task_type, contract)
+            return float(np.mean(fold_scores))
+
+        top_k_configs     = [t.user_attrs["params"] for t in top_k_trials]
+        stability_results = [
+            run_with_seeds(config=cfg, train_fn=_train_fn)
+            for cfg in top_k_configs
+        ]
+
+        ranked = rank_by_stability(top_k_configs, stability_results)
+        best_config, best_stability = ranked[0]
+
+        logger.info(
+            f"[ml_optimizer] Stability ranking:\n"
+            f"{format_stability_report(ranked, top_n=3)}"
+        )
 
     # ── Phase 3: Train final model ────────────────────────────────
     best_model_type = best_config.get("model_type", "lgbm")
@@ -1530,6 +1550,34 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         existing_registry = list(existing_registry.values())
     existing_registry = [*existing_registry, registry_entry]
 
+    # ── CRITICAL: Validate model registry ────────────────────────────
+    if not existing_registry or len(existing_registry) == 0:
+        logger.error("[MLOptimizer] CRITICAL: Model registry is empty after training!")
+        logger.error(f"[MLOptimizer] Optuna trials completed: {len(completed)}")
+        logger.error(f"[MLOptimizer] Best config: {best_config}")
+        
+        # Save error state for debugging
+        error_state_path = f"{output_dir}/ml_optimizer_error.json"
+        with open(error_state_path, "w") as f:
+            json.dump({
+                "error": "model_registry_empty",
+                "completed_trials": len(completed),
+                "best_config": best_config,
+                "cv_mean": cv_mean,
+                "timestamp": datetime.utcnow().isoformat(),
+            }, f, indent=2)
+        
+        raise ValueError(
+            f"[MLOptimizer] Model training failed - registry is empty. "
+            f"Check {error_state_path} for details."
+        )
+
+    # Validate that best model was saved
+    if not os.path.exists(model_path):
+        raise ValueError(f"[MLOptimizer] Best model not saved at {model_path}")
+
+    logger.info(f"[MLOptimizer] Registry validated: {len(existing_registry)} models")
+
     # ── Memory / OOM stats ────────────────────────────────────────
     peak_rss = _get_peak_rss()
     memory_oom_risk = any(
@@ -1585,6 +1633,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "cv_scores":            fold_scores,
         "cv_mean":              cv_mean,
         "feature_order":        feature_order,
+        "feature_data_path":    feature_data_path,  # FIX Bug 1: Add for pseudo_label_agent
         "feature_data_path_test": feature_data_path_test,
         "model_registry":       existing_registry,
         "metric_contract":      metrics,

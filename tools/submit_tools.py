@@ -57,38 +57,71 @@ def generate_submission(
         )
 
     # ── Infer column names from sample ────────────────────────────
-    id_col     = sample.columns[0]
-    target_col = sample.columns[1]
+    id_col      = sample.columns[0]
+    target_cols = sample.columns[1:]
+    
+    # Fallback default target col if empty (shouldn't happen on Kaggle)
+    target_col = target_cols[0] if target_cols else "target"
 
-    # ── Infer target dtype from sample ────────────────────────────
-    if target_dtype == "auto":
-        sample_dtype = sample[target_col].dtype
-        if sample_dtype == pl.Boolean:
-            target_dtype = "bool"
-        elif sample_dtype in (pl.Float32, pl.Float64):
-            target_dtype = "float"
-        else:
-            target_dtype = "int"
+    # ── Support Multiclass Proba / 2D predictions ──────────────────
+    if len(target_cols) > 1 and predictions.ndim == 2:
+        if predictions.shape[1] != len(target_cols):
+            raise SubmissionValidationError(
+                f"Prediction shape mismatch. sample_submission has {len(target_cols)} "
+                f"target columns, model predicted array of shape {predictions.shape}."
+            )
+        
+        # Build 2D probabilistic submission dataframe
+        sub_dict = {id_col: sample[id_col].to_list()}
+        for i, col in enumerate(target_cols):
+            sub_dict[col] = [float(p) for p in predictions[:, i]]
+            
+        submission = pl.DataFrame(sub_dict)
 
-    # ── Cast predictions to correct type ─────────────────────────
-    # IMPORTANT: For bool dtype, Polars writes Python booleans as
-    # lowercase "true"/"false" in CSV. Kaggle expects capitalized
-    # "True"/"False". We use string casting to match Kaggle exactly.
-    if target_dtype == "bool":
-        if predictions.dtype in (np.float64, np.float32):
-            preds_cast = ["True" if p > 0.5 else "False" for p in predictions]
-        else:
-            preds_cast = ["True" if bool(p) else "False" for p in predictions]
-    elif target_dtype == "float":
-        preds_cast = [float(p) for p in predictions]
     else:
-        preds_cast = [int(round(p)) for p in predictions]
+        # ── 1D / Single Target Processing ────────────────────────────
+        
+        # Automatically flatten (N, C) to 1D based on dtype required by sample
+        if predictions.ndim == 2:
+            if len(target_cols) == 1:
+                # We predicted probas but sample expects 1 column. 
+                # If int, take argmax. If binary proba, take positive class.
+                sample_dtype = sample[target_col].dtype
+                if target_dtype == "int" or sample_dtype in (pl.Int32, pl.Int64):
+                    predictions = np.argmax(predictions, axis=1)
+                elif predictions.shape[1] == 2:
+                    predictions = predictions[:, 1]
+                else:
+                    # Multiclass probabilities but only 1 column? Fall back to argmax
+                    predictions = np.argmax(predictions, axis=1)
 
-    # ── Build submission DataFrame ────────────────────────────────
-    submission = pl.DataFrame({
-        id_col:     sample[id_col].to_list(),
-        target_col: preds_cast,
-    })
+        # ── Infer target dtype from sample ────────────────────────────
+        if target_dtype == "auto":
+            sample_dtype = sample[target_col].dtype
+            if sample_dtype == pl.Boolean:
+                target_dtype = "bool"
+            elif sample_dtype in (pl.Float32, pl.Float64):
+                target_dtype = "float"
+            else:
+                target_dtype = "int"
+
+        # ── Cast predictions to correct type ─────────────────────────
+        if target_dtype == "bool":
+            if predictions.dtype in (np.float64, np.float32):
+                preds_cast = ["True" if p > 0.5 else "False" for p in predictions]
+            else:
+                preds_cast = ["True" if bool(p) else "False" for p in predictions]
+        elif target_dtype == "float":
+            preds_cast = [float(p) for p in predictions]
+        else:
+            # Safely truncate without rounding math if already integer-like
+            preds_cast = [int(p) for p in predictions]
+
+        # ── Build submission DataFrame ────────────────────────────────
+        submission = pl.DataFrame({
+            id_col:     sample[id_col].to_list(),
+            target_col: preds_cast,
+        })
 
     # ── Validate columns ──────────────────────────────────────────
     if set(submission.columns) != set(sample.columns):

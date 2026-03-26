@@ -120,6 +120,115 @@ def _run_stage1_permutation_filter(
     return survivors, dropped, actual_importances
 
 
+# ── LEAKAGE FIX: CV-Safe Stage 1 ──────────────────────────────────
+
+def _run_stage1_permutation_filter_cv_safe(
+    X: pl.DataFrame,
+    y: np.ndarray,
+    feature_names: list[str],
+    cv_folds=None,  # NEW: Optional CV folds for CV-safe computation
+    n_shuffles: int = N_STAGE1_SHUFFLES,
+    drop_percentile: float = STAGE1_DROP_PERCENTILE,
+    task_type: str = "binary",
+) -> tuple[list[str], list[str], dict[str, float]]:
+    """
+    LEAKAGE FIX: CV-safe version of Stage 1 permutation filter.
+    
+    If cv_folds provided, computes importance within folds only.
+    Otherwise, falls back to original (leaky) behavior.
+    
+    Returns:
+      (survivors, dropped, actual_importances_dict)
+    """
+    import lightgbm as lgb
+
+    X_np = X.select(feature_names).to_numpy()
+
+    lgb_params = {
+        "objective":     "multiclass" if task_type == "multiclass" else "binary" if task_type == "binary" else "regression",
+        "n_estimators":  100,
+        "num_leaves":    31,
+        "learning_rate": 0.1,
+        "verbosity":     -1,
+        "n_jobs":        1,
+    }
+
+    if cv_folds is not None and len(cv_folds) > 0:
+        # CV-SAFE: Compute importance within folds
+        logger.info(f"[NullImportance] Stage 1 CV-safe: Computing importance within {len(cv_folds)} folds")
+        
+        importance_scores = {f: 0.0 for f in feature_names}
+        
+        for train_idx, _ in cv_folds:
+            X_train = X[train_idx].select(feature_names).to_numpy()
+            y_train = y[train_idx]
+            
+            # Train on REAL y — get actual importances
+            model_real = (lgb.LGBMClassifier(**lgb_params) if task_type in ("binary", "multiclass")
+                          else lgb.LGBMRegressor(**lgb_params))
+            model_real.fit(X_train, y_train)
+            
+            for f, imp in zip(feature_names, model_real.feature_importances_):
+                importance_scores[f] += float(imp)
+            
+            del model_real
+            gc.collect()
+        
+        # Average across folds
+        n_folds = len(cv_folds)
+        actual_importances = {f: importance_scores[f] / n_folds for f in feature_names}
+    else:
+        # Fallback to original (leaky) behavior
+        logger.warning("[NullImportance] Stage 1: No cv_folds provided, using leaky computation")
+        
+        # Train on REAL y first — get actual importances
+        model_real = (lgb.LGBMClassifier(**lgb_params) if task_type in ("binary", "multiclass")
+                      else lgb.LGBMRegressor(**lgb_params))
+        model_real.fit(X_np, y)
+        actual_importances = dict(
+            zip(feature_names, model_real.feature_importances_.astype(float))
+        )
+        del model_real
+        gc.collect()
+
+    # Train n_shuffles times on SHUFFLED y — build null importance per feature
+    # Note: This still uses full data for null distribution (acceptable tradeoff)
+    null_sums = {f: 0.0 for f in feature_names}
+    rng = np.random.default_rng(seed=42)
+
+    for _ in range(n_shuffles):
+        y_shuffled = rng.permutation(y)
+        model_null = (lgb.LGBMClassifier(**lgb_params) if task_type in ("binary", "multiclass")
+                      else lgb.LGBMRegressor(**lgb_params))
+        model_null.fit(X_np, y_shuffled)
+        for f, imp in zip(feature_names, model_null.feature_importances_):
+            null_sums[f] += float(imp)
+        del model_null
+        gc.collect()
+
+    null_means = {f: null_sums[f] / n_shuffles for f in feature_names}
+
+    # Compute importance ratio: actual vs null
+    EPSILON = 1e-6
+    ratios = {
+        f: actual_importances[f] / (null_means[f] + EPSILON)
+        for f in feature_names
+    }
+
+    # Drop bottom drop_percentile by ratio
+    threshold_ratio = float(np.percentile(list(ratios.values()), drop_percentile * 100))
+    survivors = [f for f in feature_names if ratios[f] >= threshold_ratio]
+    dropped   = [f for f in feature_names if ratios[f] < threshold_ratio]
+
+    logger.info(
+        f"[NullImportance] Stage 1: {len(feature_names)} features → "
+        f"{len(survivors)} survivors, {len(dropped)} dropped "
+        f"(threshold ratio={threshold_ratio:.3f})"
+    )
+
+    return survivors, dropped, actual_importances
+
+
 # ── Stage 2: persistent sandbox script template ──────────────────
 
 STAGE2_SCRIPT_TEMPLATE = '''

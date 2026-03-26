@@ -1312,7 +1312,9 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
 
     # ── Phase 1: Optuna study ─────────────────────────────────────
     direction = _get_study_direction(metric)
-    n_trials = min(N_OPTUNA_TRIALS, max(20, len(y)))
+    # Dynamic scaling for tiny datasets: 3 trials per 100 rows
+    n_trials = min(N_OPTUNA_TRIALS, max(3, int(len(y) * 0.03)))
+        
     print(f"[MLOptimizer] Running Optuna ({n_trials} trials, direction={direction}, mem limit={MAX_MEMORY_GB}GB)...")
 
     study = optuna.create_study(
@@ -1361,6 +1363,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
             'stability_score': 0.35,
             'seed_results': [0.5, 0.5, 0.5, 0.5, 0.5],
         })()
+        top_k_trials = []
     else:
         if direction == "minimize":
             completed.sort(key=lambda t: t.user_attrs["mean_cv"])

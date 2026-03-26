@@ -73,7 +73,7 @@ def _groq_fallback(*args, **kwargs):
     """Fall back to Gemini Flash if Groq is down."""
     logger.warning("[ServiceHealth] Falling back to Gemini Flash (Groq unavailable).")
     from tools.llm_client import call_llm
-    return call_llm(*args, model="gemini", **kwargs)
+    return call_llm(*args, model="gemini-flash", **kwargs)
 
 
 def _chromadb_fallback(*args, **kwargs):

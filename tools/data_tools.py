@@ -128,10 +128,13 @@ def profile_data(df: pl.DataFrame) -> dict:
         "missing_rates":    missing_rates,
         "missing_counts":   missing_counts,
         "shape":            list(df.shape),
+        "n_rows":           n_rows,
+        "n_cols":           len(df.columns),
         "numeric_cols":     numeric_cols,
         "categorical_cols": categorical_cols,
         "boolean_cols":     boolean_cols,
         "cardinality":      cardinality,
+        "n_unique":         {col: int(df[col].n_unique()) for col in df.columns},
         "profiled_at":      datetime.utcnow().isoformat(),
     }
 

@@ -40,18 +40,31 @@ def with_agent_retry(agent_name: str):
                     )
 
                     if attempt == MAX_INNER_ATTEMPTS:
-                        # All attempts exhausted — run circuit breaker for side effects
-                        # (logging, checkpoint, state mutation) then re-raise so
-                        # contract tests that expect exceptions still work.
+                        # All attempts exhausted — run circuit breaker, then RETURN
+                        # modified state instead of re-raising (which kills LangGraph).
                         level = get_escalation_level(state)
-                        handle_escalation(
+                        escalated_state = handle_escalation(
                             state=state,
                             level=level,
                             agent_name=agent_name,
                             error=e,
                             traceback_str=tb,
                         )
-                        raise
+                        # Mark state as halted — downstream nodes can check this
+                        if isinstance(escalated_state, dict):
+                            escalated_state["pipeline_halted"] = True
+                            escalated_state["pipeline_halt_reason"] = (
+                                f"{agent_name} failed after {MAX_INNER_ATTEMPTS} attempts: {e}"
+                            )
+                            return escalated_state
+                        # Fallback if handle_escalation doesn't return a dict
+                        return {
+                            **state,
+                            "pipeline_halted": True,
+                            "pipeline_halt_reason": (
+                                f"{agent_name} failed after {MAX_INNER_ATTEMPTS} attempts: {e}"
+                            ),
+                        }
 
                     # Not yet exhausted — append error context and retry
                     state = {

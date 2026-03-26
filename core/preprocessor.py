@@ -208,3 +208,56 @@ class TabularPreprocessor:
             raise FileNotFoundError(f"Preprocessor not found at {input_path}")
         with open(input_path, "rb") as f:
             return pickle.load(f)
+
+    def save_config(self, output_path: str):
+        """
+        Save preprocessor config (not fitted state) for later reconstruction.
+        Used for CV where we need fresh preprocessor per fold.
+        """
+        import json
+        config = {
+            "target_col": self.target_col,
+            "id_cols": self.id_cols,
+            "numeric_imputes": self.numeric_imputes,
+            "string_imputes": self.string_imputes,
+            "bool_imputes": self.bool_imputes,
+            "categorical_encoders": self.categorical_encoders,
+            "feature_expressions": self.feature_expressions,
+            "group_mappings": self.group_mappings,
+        }
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(config, f, indent=2)
+        logger.info(f"[TabularPreprocessor] Config saved to {output_path}")
+
+    @staticmethod
+    def load_config(config_path: str) -> "TabularPreprocessor":
+        """
+        Reconstruct preprocessor from saved config.
+        """
+        import json
+        with open(config_path) as f:
+            config = json.load(f)
+        
+        prep = TabularPreprocessor(
+            target_col=config["target_col"],
+            id_cols=config["id_cols"]
+        )
+        prep.numeric_imputes = config["numeric_imputes"]
+        prep.string_imputes = config["string_imputes"]
+        prep.bool_imputes = config["bool_imputes"]
+        prep.categorical_encoders = config["categorical_encoders"]
+        prep.feature_expressions = config["feature_expressions"]
+        prep.group_mappings = config["group_mappings"]
+        logger.info(f"[TabularPreprocessor] Config loaded from {config_path}")
+        return prep
+
+    def clone_unfitted(self) -> "TabularPreprocessor":
+        """
+        Create a new preprocessor with same config but unfitted state.
+        Used for CV where we need fresh preprocessor per fold.
+        """
+        return TabularPreprocessor(
+            target_col=self.target_col,
+            id_cols=self.id_cols
+        )

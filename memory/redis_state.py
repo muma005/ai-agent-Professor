@@ -71,12 +71,20 @@ class _DictRedis:
         return True
 
     def set(self, key, value, ex=None, **kwargs):
+        import time
         self._store[key] = value
         if ex is not None:
-            self._ttls[key] = ex
+            self._ttls[key] = time.time() + ex
+        else:
+            self._ttls.pop(key, None)
         return True
 
     def get(self, key):
+        import time
+        if key in self._ttls and time.time() > self._ttls[key]:
+            self._store.pop(key, None)
+            self._ttls.pop(key, None)
+            return None
         return self._store.get(key)
 
     def delete(self, *keys):

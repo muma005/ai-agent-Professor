@@ -32,12 +32,17 @@ def build_competition_fingerprint(state: ProfessorState) -> dict:
         import os, json as _json
         if os.path.exists(state["schema_path"]):
             try:
-                schema = _json.load(open(state["schema_path"]))
+                with open(state["schema_path"]) as _f:
+                    schema = _json.load(_f)
             except Exception:
                 pass
 
     # -- Row count bucket -------------------------------------------------------
     n_rows = schema.get("n_rows", 0)
+    if n_rows == 0:
+        # Fallback: try shape field
+        shape = schema.get("shape", [])
+        n_rows = shape[0] if shape else 0
     if n_rows < 1_000:
         n_rows_bucket = "tiny"
     elif n_rows < 10_000:

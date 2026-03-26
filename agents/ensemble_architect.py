@@ -100,11 +100,24 @@ def _validate_data_hash_consistency(state: ProfessorState) -> ProfessorState:
 
 # ── OOF validation ────────────────────────────────────────────────
 
-def _validate_oof_present(model_registry: dict) -> None:
+import os
+
+def _get_oof_from_entry(entry: dict) -> np.ndarray:
+    """Helper to get OOF from either disk (.npy) or backward-compatible list formatting."""
+    if "oof_predictions_path" in entry and os.path.exists(entry["oof_predictions_path"]):
+        return np.load(entry["oof_predictions_path"]).astype(float)
+    elif "oof_predictions" in entry:
+        return np.array(entry["oof_predictions"], dtype=float)
+    raise ValueError(f"Missing OOF predictions in registry entry: {entry.get('model_type', 'unknown')}")
+
+def _validate_oof_present(model_registry: list) -> None:
     """Raises ValueError if any model is missing OOF predictions."""
+    if not isinstance(model_registry, list):
+        raise ValueError("model_registry must be a list.")
+
     missing = [
-        name for name, entry in model_registry.items()
-        if not entry.get("oof_predictions")
+        entry.get("model_type", "unknown") for entry in model_registry
+        if not entry.get("oof_predictions") and not entry.get("oof_predictions_path")
     ]
     if missing:
         raise ValueError(
@@ -143,7 +156,7 @@ def _write_selection_report(state: ProfessorState, result: dict) -> None:
 # ── GM-CAP 5: Diversity-first ensemble selection ─────────────────
 
 def select_diverse_ensemble(
-    model_registry: dict,
+    model_registry: list,
     state: ProfessorState,
     diversity_weight: float = DIVERSITY_WEIGHT,
     max_correlation: float = MAX_CORRELATION_REJECT,
@@ -164,23 +177,23 @@ def select_diverse_ensemble(
         dict with keys: selected_models, prize_candidates, selection_log,
                         ensemble_weights, correlation_matrix
     """
+    if not isinstance(model_registry, list) or not model_registry:
+        raise ValueError("model_registry is empty or not a list — no models to select from.")
+
     _validate_oof_present(model_registry)
 
-    models = list(model_registry.items())
-    if not models:
-        raise ValueError("model_registry is empty — no models to select from.")
-
     # Sort by CV score descending — anchor is the best model
-    models.sort(key=lambda x: float(x[1].get("cv_mean", 0.0)), reverse=True)
-    best_cv = float(models[0][1]["cv_mean"])
+    models = sorted(model_registry, key=lambda x: float(x.get("cv_mean", 0.0)), reverse=True)
+    best_cv = float(models[0].get("cv_mean", 0.0))
 
-    anchor_name, anchor_entry = models[0]
+    anchor_entry = models[0]
+    anchor_name = anchor_entry.get("model_type", "unknown")
     selected = [anchor_name]
     selection_log = []
     prize_candidates = []
 
     # Build current ensemble OOF mean (starts as just the anchor's OOF)
-    oof_arrays = {anchor_name: np.array(anchor_entry["oof_predictions"], dtype=float)}
+    oof_arrays = {anchor_name: _get_oof_from_entry(anchor_entry)}
     ensemble_oof_mean = oof_arrays[anchor_name].copy()
 
     selection_log.append({
@@ -193,7 +206,8 @@ def select_diverse_ensemble(
     })
 
     # Greedy selection loop
-    for model_name, entry in models[1:]:
+    for entry in models[1:]:
+        model_name = entry.get("model_type", "unknown")
         if len(selected) >= max_ensemble_size:
             selection_log.append({
                 "model": model_name,
@@ -205,7 +219,7 @@ def select_diverse_ensemble(
             })
             continue
 
-        candidate_oof = np.array(entry["oof_predictions"], dtype=float)
+        candidate_oof = _get_oof_from_entry(entry)
         cv = float(entry.get("cv_mean", 0.0))
 
         # Pearson correlation between candidate OOF and current ensemble mean

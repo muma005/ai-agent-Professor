@@ -75,6 +75,20 @@ BLOCKED_MODULES = {
 
 SANDBOX_TIMEOUT_S = 600  # 10 minutes
 
+# ── Safe environment for subprocess sandbox (strips API keys) ────
+_ENV_WHITELIST = {
+    "PATH", "PYTHONPATH", "PYTHONHOME", "HOME", "USERPROFILE",
+    "SYSTEMROOT", "TEMP", "TMP", "VIRTUAL_ENV", "CONDA_PREFIX",
+    "LANG", "LC_ALL",
+}
+
+
+def _safe_env() -> dict:
+    """Build a safe env dict — only whitelisted vars, no API keys."""
+    env = {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
 
 class SandboxExecutionError(Exception):
     """Raised when code fails all retry attempts."""
@@ -87,13 +101,13 @@ class SandboxTimeoutError(Exception):
 
 def _validate_imports(code: str) -> Optional[str]:
     """
-    Static check: scans code for blocked import statements.
+    Static check: scans code for blocked import statements AND bypass patterns.
     Returns error message if blocked import found, else None.
     """
     for line in code.split("\n"):
         stripped = line.strip()
+        # Check standard import statements
         if stripped.startswith("import ") or stripped.startswith("from "):
-            # Extract module name
             if stripped.startswith("from "):
                 parts = stripped.split()
                 if len(parts) >= 2:
@@ -109,6 +123,11 @@ def _validate_imports(code: str) -> Optional[str]:
                     f"Import of '{module}' is not allowed in sandbox. "
                     f"Blocked modules: {', '.join(sorted(BLOCKED_MODULES))}"
                 )
+        # Check bypass patterns: __import__(), importlib
+        if "__import__" in stripped:
+            return "Use of __import__() is not allowed in sandbox."
+        if "importlib" in stripped:
+            return "Use of importlib is not allowed in sandbox."
     return None
 
 
@@ -252,7 +271,7 @@ def _execute_subprocess(code: str, session_id: str, timeout_seconds: int = 600,
             text=True,
             timeout=timeout_seconds,
             cwd=os.getcwd(),
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=_safe_env(),
         )
 
         # Clean up temp script

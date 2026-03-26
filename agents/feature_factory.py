@@ -1163,6 +1163,10 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         survivors = set(survivor_list)
         
     final_candidates = [c for c in valid_candidates if c.name in survivors]
+    # Dynamically cap evaluation computation relative to dataset size 
+    eval_cap = max(5, int(len(y) * 0.05)) if y is not None else len(valid_candidates)
+    if len(final_candidates) > eval_cap:
+        final_candidates = final_candidates[:eval_cap]
     
     # Wilcoxon Gate + Solidification
     added_features = []

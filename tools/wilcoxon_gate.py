@@ -15,13 +15,23 @@ def is_significantly_better(
     fold_scores_b: list[float],
     p_threshold: float = P_VALUE_THRESHOLD,
     alternative: str = "greater",
+    direction: str = "maximize",
 ) -> bool:
     """
     Returns True iff fold_scores_a is statistically significantly better
     than fold_scores_b at p < p_threshold using the Wilcoxon signed-rank test.
 
+    Args:
+        direction: "maximize" (higher=better, e.g. AUC) or
+                   "minimize" (lower=better, e.g. RMSE, log_loss).
+                   When "minimize", the alternative is flipped to "less".
+
     Never raises — returns False on any error (conservative default).
     """
+    # For minimize metrics, "better" means LOWER scores
+    if direction == "minimize":
+        alternative = "less"
+
     if len(fold_scores_a) != len(fold_scores_b):
         logger.warning(
             f"[WilcoxonGate] fold count mismatch: "
@@ -36,7 +46,11 @@ def is_significantly_better(
             f"minimum {MIN_FOLDS_REQUIRED} required for reliable Wilcoxon test. "
             f"Falling back to mean comparison."
         )
-        return bool(float(np.mean(fold_scores_a)) > float(np.mean(fold_scores_b)))
+        mean_a = float(np.mean(fold_scores_a))
+        mean_b = float(np.mean(fold_scores_b))
+        if direction == "minimize":
+            return bool(mean_a < mean_b)
+        return bool(mean_a > mean_b)
 
     differences = np.array(fold_scores_a) - np.array(fold_scores_b)
 
@@ -52,12 +66,16 @@ def is_significantly_better(
             f"[WilcoxonGate] scipy.stats.wilcoxon raised: {e}. "
             f"Falling back to mean comparison."
         )
-        return bool(float(np.mean(fold_scores_a)) > float(np.mean(fold_scores_b)))
+        mean_a = float(np.mean(fold_scores_a))
+        mean_b = float(np.mean(fold_scores_b))
+        if direction == "minimize":
+            return bool(mean_a < mean_b)
+        return bool(mean_a > mean_b)
 
     result = bool(p_value < p_threshold)
     logger.info(
         f"[WilcoxonGate] stat={stat:.4f}, p={p_value:.4f}, "
-        f"threshold={p_threshold}, significant={result}. "
+        f"threshold={p_threshold}, significant={result}, direction={direction}. "
         f"mean_a={np.mean(fold_scores_a):.5f}, mean_b={np.mean(fold_scores_b):.5f}, "
         f"delta={np.mean(differences):+.5f}"
     )

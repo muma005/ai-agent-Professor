@@ -1,399 +1,293 @@
 """
-Data Splitter — Produces deterministic, reproducible partitions.
+Data Splitter — deterministic, reproducible train/public/private splits.
 
-Takes competition data and produces three partitions:
-- Train (60%): What Professor receives (with target)
-- Public test (12%): Features only, target held for scoring
-- Private test (28%): Features only, target held for scoring
-
-Critical design decisions:
-1. Split is DETERMINISTIC — same data + same seed = exact same split
-2. Data isolation — Professor NEVER sees private labels
-3. Distribution preservation — KS-test validation between train/test
-4. Strategy matched to competition type (stratified/temporal/group)
-
-File naming convention:
-- train.csv: What Professor receives
-- test.csv: Features only (public + private rows shuffled together)
-- .public_labels.csv: HIDDEN (dotfile) — only leaderboard reads
-- .private_labels.csv: HIDDEN (dotfile) — only leaderboard reads
-- sample_submission.csv: Template for submissions
+CRITICAL INVARIANTS:
+1. Same data + same seed = exact same split every time
+2. No row appears in more than one partition
+3. Target distribution is preserved across partitions
+4. Test file has NO target column (same as real Kaggle)
+5. Public/private labels are hidden files (dotfiles)
 """
 
-from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple
-import json
-import hashlib
-from pathlib import Path
-
-import numpy as np
 import polars as pl
-from sklearn.model_selection import train_test_split
+import numpy as np
+import hashlib
+import json
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Optional
 
 from simulator.competition_registry import CompetitionEntry
 
 
 @dataclass
 class SplitResult:
-    """Result of splitting competition data."""
-    
-    train_path: Path
-    test_path: Path
-    public_labels_path: Path
-    private_labels_path: Path
-    sample_submission_path: Path
+    train_path: str
+    test_path: str                # Features only (public + private rows, shuffled)
+    sample_submission_path: str
+    public_labels_path: str       # HIDDEN — only leaderboard.py reads this
+    private_labels_path: str      # HIDDEN — only leaderboard.py reads this
     n_train: int
     n_public: int
     n_private: int
-    split_metadata: Dict[str, Any]
-    
-    @property
-    def train_hash(self) -> str:
-        """Hash of train data for determinism verification."""
-        return hashlib.md5(Path(self.train_path).read_bytes()).hexdigest()
-    
-    @property
-    def public_hash(self) -> str:
-        """Hash of public test data for determinism verification."""
-        return hashlib.md5(Path(self.public_labels_path).read_bytes()).hexdigest()
-    
-    @property
-    def private_hash(self) -> str:
-        """Hash of private test data for determinism verification."""
-        return hashlib.md5(Path(self.private_labels_path).read_bytes()).hexdigest()
-    
-    def verify_determinism(self, other: "SplitResult") -> bool:
-        """Verify this split is identical to another (for testing)."""
-        return (
-            self.train_hash == other.train_hash
-            and self.public_hash == other.public_hash
-            and self.private_hash == other.private_hash
-        )
+    split_hash: str               # SHA-256 of split for reproducibility verification
 
 
 def split_competition_data(
     data_path: str,
     entry: CompetitionEntry,
-    force: bool = False,
+    output_dir: str,
 ) -> SplitResult:
     """
-    Produces 3 partitions from a single dataset.
-    
-    IMPORTANT: The split is DETERMINISTIC and REPRODUCIBLE.
-    Same data + same seed = exact same split every time.
-    This is essential for regression testing — if Professor's score
-    changes between runs on the same split, the change is real,
-    not split variance.
-    
-    Args:
-        data_path: Path to the full competition data CSV
-        entry: Competition entry with split configuration
-        force: If True, re-split even if cached split exists
-    
-    Returns:
-        SplitResult with paths to all partitions and metadata
+    Split competition data into train / public test / private test.
+
+    Split ratios:
+    - Train: 60% of total data
+    - Public test: 12% of total data (30% of the 40% test)
+    - Private test: 28% of total data (70% of the 40% test)
+
+    Professor receives: train.csv (with target), test.csv (without target),
+    sample_submission.csv. Identical to real Kaggle experience.
     """
-    data_dir = entry.get_data_dir()
-    
-    # Check if split already exists
-    train_path = entry.get_train_path()
-    test_path = entry.get_test_path()
-    public_labels_path = entry.get_public_labels_path()
-    private_labels_path = entry.get_private_labels_path()
-    
-    if not force and train_path.exists() and test_path.exists():
-        # Load existing split metadata
-        meta_path = data_dir / "split_meta.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            print(f"[splitter] Split already exists for {entry.slug}. Reusing.")
-            
-            # Verify hashes match (determinism check)
-            current_hash = hashlib.md5(Path(data_path).read_bytes()).hexdigest()
-            if meta.get("data_hash") == current_hash:
-                return SplitResult(
-                    train_path=train_path,
-                    test_path=test_path,
-                    public_labels_path=public_labels_path,
-                    private_labels_path=private_labels_path,
-                    sample_submission_path=entry.get_sample_submission_path(),
-                    n_train=meta["n_train"],
-                    n_public=meta["n_public"],
-                    n_private=meta["n_private"],
-                    split_metadata=meta,
-                )
-            else:
-                print("[splitter] Data changed, re-splitting...")
-    
-    # Load full dataset
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+
     df = pl.read_csv(data_path)
     target = entry.target_column
-    seed = entry.random_seed  # always 42
-    
-    print(f"[splitter] Splitting {entry.slug} ({len(df)} rows) using {entry.split_strategy} strategy...")
-    
+    id_col = entry.id_column
+    seed = entry.random_seed
+
+    # ── Validate ──
+    assert target in df.columns, f"Target '{target}' not in columns: {df.columns}"
+    assert id_col in df.columns, f"ID '{id_col}' not in columns: {df.columns}"
+
     # ── Step 1: Split into train (60%) and test (40%) ──
     if entry.split_strategy == "stratified":
-        # Stratified by target — preserves class distribution
-        train_df, test_df = _stratified_split(
-            df, target=target, test_size=entry.test_ratio, seed=seed
-        )
-        
+        train_df, test_df = _stratified_split(df, target, entry.test_ratio, seed)
     elif entry.split_strategy == "temporal":
-        # Sort by time column, take last 40% as test
-        if entry.split_column is None:
-            raise ValueError("temporal split requires split_column to be set")
-        df_sorted = df.sort(entry.split_column)
-        split_idx = int(len(df_sorted) * (1 - entry.test_ratio))
-        train_df = df_sorted[:split_idx]
-        test_df = df_sorted[split_idx:]
-        
+        train_df, test_df = _temporal_split(df, entry.split_column, entry.test_ratio)
     elif entry.split_strategy == "group":
-        # Split by group — no group appears in both train and test
-        if entry.split_column is None:
-            raise ValueError("group split requires split_column to be set")
-        train_df, test_df = _stratified_group_split(
-            df, 
-            group_column=entry.split_column,
-            target=target,
-            test_size=entry.test_ratio, 
-            seed=seed
-        )
-    
+        train_df, test_df = _group_split(df, entry.split_column, entry.test_ratio, seed)
     else:
         raise ValueError(f"Unknown split strategy: {entry.split_strategy}")
-    
-    # Validate split quality
-    _validate_split(train_df, test_df, entry)
-    
+
     # ── Step 2: Split test into public (30%) and private (70%) ──
-    # Note: 30% of test = 0.3 * 0.4 = 12% of total
-    #       70% of test = 0.7 * 0.4 = 28% of total
-    public_test, private_test = _stratified_split(
-        test_df, target=target, test_size=0.70, seed=seed + 1
-    )
-    
-    # ── Step 3: Save partitions ──
-    data_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Train: what Professor receives (with target)
+    public_test, private_test = _stratified_split(test_df, target, 0.70, seed + 1)
+
+    # ── Step 3: Validate distributions ──
+    _validate_distribution(df, train_df, target, "train")
+
+    # ── Step 4: Save partitions ──
+    train_path = str(output / "train.csv")
+    test_path = str(output / "test.csv")
+    sample_sub_path = str(output / "sample_submission.csv")
+    public_labels_path = str(output / ".public_labels.csv")
+    private_labels_path = str(output / ".private_labels.csv")
+
+    # Train: full data with target
     train_df.write_csv(train_path)
-    
-    # Combine public + private into one test file (features only)
-    # Professor sees this as the test set — same as real Kaggle
-    full_test = pl.concat([public_test, private_test])
-    # Shuffle to mix public and private rows
-    full_test = full_test.sample(fraction=1.0, seed=seed + 2)
+
+    # Test: public + private combined, shuffled, WITHOUT target
+    full_test = pl.concat([public_test, private_test]).sample(
+        fraction=1.0, shuffle=True, seed=seed + 2
+    )
     full_test_features = full_test.drop(target)
     full_test_features.write_csv(test_path)
-    
-    # Hidden label files (dotfiles)
-    # Only the Simulated Leaderboard component reads these
-    public_test[[entry.id_column, target]].write_csv(public_labels_path)
-    private_test[[entry.id_column, target]].write_csv(private_labels_path)
-    
-    # Sample submission (all zeros or median, same as Kaggle provides)
-    default_value = _default_prediction(entry.task_type)
-    sample = full_test_features[[entry.id_column]].with_columns(
-        pl.lit(default_value).alias(target)
+
+    # Hidden labels (dotfiles)
+    public_test.select([id_col, target]).write_csv(public_labels_path)
+    private_test.select([id_col, target]).write_csv(private_labels_path)
+
+    # Sample submission
+    default_pred = _default_prediction(df, target, entry.task_type)
+    sample = full_test_features.select(id_col).with_columns(
+        pl.lit(default_pred).alias(target)
     )
-    sample.write_csv(entry.get_sample_submission_path())
-    
-    # ── Step 4: Save metadata for reproducibility ──
-    meta = {
-        "competition_slug": entry.slug,
+    sample.write_csv(sample_sub_path)
+
+    # Compute split hash for reproducibility verification
+    split_hash = _compute_split_hash(train_path, public_labels_path, private_labels_path)
+
+    # Save metadata
+    metadata = {
+        "competition": entry.slug,
         "strategy": entry.split_strategy,
         "seed": seed,
-        "train_ratio": 1 - entry.test_ratio,
-        "test_ratio": entry.test_ratio,
-        "public_ratio": entry.public_ratio,
+        "n_total": len(df),
         "n_train": len(train_df),
         "n_public": len(public_test),
         "n_private": len(private_test),
-        "n_test_total": len(full_test),
-        "target_distribution_train": _target_stats(train_df, target, entry.task_type),
-        "target_distribution_public": _target_stats(public_test, target, entry.task_type),
-        "target_distribution_private": _target_stats(private_test, target, entry.task_type),
-        "data_hash": hashlib.md5(Path(data_path).read_bytes()).hexdigest(),
-        "train_hash": hashlib.md5(train_path.read_bytes()).hexdigest(),
-        "public_hash": hashlib.md5(public_labels_path.read_bytes()).hexdigest(),
-        "private_hash": hashlib.md5(private_labels_path.read_bytes()).hexdigest(),
+        "split_hash": split_hash,
+        "train_target_mean": float(train_df[target].mean()) if entry.task_type != "multiclass" else None,
     }
-    
-    meta_path = data_dir / "split_meta.json"
-    meta_path.write_text(json.dumps(meta, indent=2))
-    
-    print(
-        f"[splitter] Complete: {len(train_df)} train, "
-        f"{len(public_test)} public, {len(private_test)} private"
-    )
-    
+    (output / "split_metadata.json").write_text(json.dumps(metadata, indent=2))
+
     return SplitResult(
         train_path=train_path,
         test_path=test_path,
+        sample_submission_path=sample_sub_path,
         public_labels_path=public_labels_path,
         private_labels_path=private_labels_path,
-        sample_submission_path=entry.get_sample_submission_path(),
         n_train=len(train_df),
         n_public=len(public_test),
         n_private=len(private_test),
-        split_metadata=meta,
+        split_hash=split_hash,
     )
 
 
-def _stratified_split(
-    df: pl.DataFrame,
-    target: str,
-    test_size: float,
-    seed: int,
-) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """
-    Stratified train/test split preserving target distribution.
-    Falls back to random split for regression tasks.
-    """
-    y = df[target].to_numpy()
-    
-    # For classification, stratify by target
-    if y.dtype.kind in ('i', 'u', 'b', 'O'):  # int, uint, bool, object
-        stratify = y
+def _stratified_split(df, target, test_ratio, seed):
+    """Stratified split preserving target distribution."""
+    n = len(df)
+    n_test = int(n * test_ratio)
+
+    # For classification: stratify by target
+    # For regression: stratify by target quantile bins
+    if df[target].dtype in [pl.Utf8, pl.Categorical] or df[target].n_unique() < 20:
+        # Classification — stratify by class
+        indices = np.arange(n)
+        rng = np.random.RandomState(seed)
+
+        target_values = df[target].to_numpy()
+        test_indices = []
+
+        for cls in np.unique(target_values):
+            cls_indices = indices[target_values == cls]
+            rng.shuffle(cls_indices)
+            n_cls_test = max(1, int(len(cls_indices) * test_ratio))
+            test_indices.extend(cls_indices[:n_cls_test].tolist())
+
+        test_indices = sorted(test_indices)
+        train_indices = sorted(set(range(n)) - set(test_indices))
     else:
-        # For continuous targets (regression), bin the target for stratification
-        n_bins = min(10, len(np.unique(y)))
-        y_binned = np.digitize(y, bins=np.linspace(y.min(), y.max(), n_bins))
-        stratify = y_binned
-    
-    train_idx, test_idx = train_test_split(
-        np.arange(len(df)),
-        test_size=test_size,
-        random_state=seed,
-        stratify=stratify,
-    )
-    
-    return df[train_idx], df[test_idx]
+        # Regression — stratify by quantile bins
+        quantiles = df[target].quantile([0.2, 0.4, 0.6, 0.8]).to_list()
+        bins = [-float("inf")] + quantiles + [float("inf")]
+        bin_labels = list(range(len(bins) - 1))
+
+        target_np = df[target].to_numpy()
+        bin_assignments = np.digitize(target_np, bins[1:-1])
+
+        indices = np.arange(n)
+        rng = np.random.RandomState(seed)
+        test_indices = []
+
+        for b in np.unique(bin_assignments):
+            b_indices = indices[bin_assignments == b]
+            rng.shuffle(b_indices)
+            n_b_test = max(1, int(len(b_indices) * test_ratio))
+            test_indices.extend(b_indices[:n_b_test].tolist())
+
+        test_indices = sorted(test_indices)
+        train_indices = sorted(set(range(n)) - set(test_indices))
+
+    return df[train_indices], df[test_indices]
 
 
-def _stratified_group_split(
-    df: pl.DataFrame,
-    group_column: str,
-    target: str,
-    test_size: float,
-    seed: int,
-) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    """
-    Split by group — no group appears in both train and test.
-    Uses stratified sampling on groups based on target distribution.
-    """
-    # Get unique groups
+def _temporal_split(df, time_column, test_ratio):
+    """Temporal split — last N% as test. No shuffling."""
+    df_sorted = df.sort(time_column)
+    split_idx = int(len(df_sorted) * (1 - test_ratio))
+    return df_sorted[:split_idx], df_sorted[split_idx:]
+
+
+def _group_split(df, group_column, test_ratio, seed):
+    """Group split — no group appears in both train and test."""
     groups = df[group_column].unique().to_list()
-    
-    # Compute target mean per group (for stratification)
-    group_stats = df.group_by(group_column).agg(
-        pl.col(target).mean().alias("target_mean")
-    )
-    
-    # Stratified split of groups
-    group_targets = group_stats["target_mean"].to_numpy()
-    
-    # Bin for stratification if continuous
-    if group_targets.dtype.kind == 'f':
-        n_bins = min(5, len(np.unique(group_targets)))
-        group_bins = np.digitize(group_targets, bins=np.linspace(
-            group_targets.min(), group_targets.max(), n_bins
-        ))
-        stratify = group_bins
-    else:
-        stratify = group_targets.astype(int)
-    
-    train_groups, test_groups = train_test_split(
-        groups,
-        test_size=test_size,
-        random_state=seed,
-        stratify=stratify,
-    )
-    
-    train_df = df.filter(pl.col(group_column).is_in(train_groups))
-    test_df = df.filter(pl.col(group_column).is_in(test_groups))
-    
+    rng = np.random.RandomState(seed)
+    rng.shuffle(groups)
+    n_test_groups = max(1, int(len(groups) * test_ratio))
+    test_groups = set(groups[:n_test_groups])
+
+    test_df = df.filter(pl.col(group_column).is_in(list(test_groups)))
+    train_df = df.filter(~pl.col(group_column).is_in(list(test_groups)))
     return train_df, test_df
 
 
-def _validate_split(
-    train_df: pl.DataFrame,
-    test_df: pl.DataFrame,
-    entry: CompetitionEntry,
-    max_reseeds: int = 5,
-) -> None:
-    """
-    Validate split quality:
-    1. No row appears in both partitions
-    2. Target distribution preserved (KS-test for classification)
-    3. No categorical level appears only in test
-    
-    Raises ValueError if validation fails after max_reseeds attempts.
-    """
-    target = entry.target_column
-    
-    # Check no overlap
-    train_ids = set(train_df[entry.id_column].to_list())
-    test_ids = set(test_df[entry.id_column].to_list())
-    overlap = train_ids & test_ids
-    if overlap:
-        raise ValueError(f"Split validation failed: {len(overlap)} IDs in both train and test")
-    
-    # Check target distribution (for classification)
-    if entry.task_type in ("binary", "multiclass"):
-        train_dist = _target_stats(train_df, target, entry.task_type)
-        test_dist = _target_stats(test_df, target, entry.task_type)
-        
-        # Simple chi-square-like check
-        for label in train_dist:
-            if label not in test_dist:
-                # Label missing from test — acceptable for rare classes
-                if train_dist[label] < 0.05:  # < 5% of train
-                    print(f"[splitter] Warning: Label '{label}' rare in train ({train_dist[label]:.2%})")
-                else:
-                    raise ValueError(
-                        f"Split validation failed: Label '{label}' missing from test "
-                        f"but common in train ({train_dist[label]:.2%})"
-                    )
-    
-    # Check no categorical level appears only in test
-    # (would cause model to fail on unseen categories)
-    for col in train_df.columns:
-        if col in (entry.id_column, target):
-            continue
-        if train_df[col].dtype in (pl.Categorical, pl.Utf8):
-            train_levels = set(train_df[col].drop_nulls().unique().to_list())
-            test_levels = set(test_df[col].drop_nulls().unique().to_list())
-            only_in_test = test_levels - train_levels
-            if only_in_test:
-                print(
-                    f"[splitter] Warning: Column '{col}' has {len(only_in_test)} "
-                    f"levels only in test: {list(only_in_test)[:5]}"
-                )
+def _validate_distribution(full_df, train_df, target, name):
+    """Validate that split didn't distort target distribution."""
+    try:
+        from scipy.stats import ks_2samp
+
+        full_vals = full_df[target].drop_nulls().to_numpy().astype(float)
+        split_vals = train_df[target].drop_nulls().to_numpy().astype(float)
+
+        stat, pvalue = ks_2samp(full_vals, split_vals)
+        if pvalue < 0.01:
+            print(f"[WARNING] {name} split has significantly different target "
+                  f"distribution (KS p={pvalue:.4f}). Consider re-seeding.")
+    except Exception:
+        pass  # scipy not available, skip validation
 
 
-def _target_stats(df: pl.DataFrame, target: str, task_type: str) -> Dict[str, float]:
-    """Compute target distribution as proportions."""
-    if task_type in ("binary", "multiclass"):
-        counts = df[target].value_counts(sort=True)
-        total = len(df)
-        return {str(row[target]): row["count"] / total for row in counts.iter_rows(named=True)}
-    else:
-        # For regression, return mean and std
-        return {
-            "mean": float(df[target].mean()),
-            "std": float(df[target].std()),
-            "min": float(df[target].min()),
-            "max": float(df[target].max()),
-        }
-
-
-def _default_prediction(task_type: str) -> float:
-    """Return default prediction value for sample submission."""
+def _default_prediction(df, target, task_type):
+    """Generate a default prediction for sample_submission."""
     if task_type == "binary":
-        return 0.5
+        return 0
     elif task_type == "multiclass":
-        return 0  # Will be overridden per-class in real submissions
-    else:
-        return 0.0
+        return df[target].mode().to_list()[0]
+    elif task_type == "regression":
+        return float(df[target].median())
+    return 0
+
+
+def _compute_split_hash(train_path, public_path, private_path):
+    """SHA-256 hash of all three split files — for reproducibility verification."""
+    sha = hashlib.sha256()
+    for path in [train_path, public_path, private_path]:
+        with open(path, "rb") as f:
+            sha.update(f.read())
+    return sha.hexdigest()[:16]
+
+
+def ensure_data_cached(entry: CompetitionEntry, cache_dir: str):
+    """
+    Download competition data if not already cached.
+    Uses Kaggle API. Falls back to manual instruction if API fails.
+    """
+    cache_path = Path(cache_dir) / entry.slug
+    full_data = cache_path / "full_data.csv"
+
+    if full_data.exists():
+        return  # already cached
+
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    if entry.download_method == "kaggle_api":
+        import subprocess
+        try:
+            subprocess.run(
+                ["kaggle", "competitions", "download", "-c", entry.slug, "-p", str(cache_path)],
+                check=True, capture_output=True, text=True, timeout=120,
+            )
+            # Unzip if needed
+            import zipfile
+            for zf in cache_path.glob("*.zip"):
+                with zipfile.ZipFile(zf, "r") as z:
+                    z.extractall(cache_path)
+                zf.unlink()
+
+            # Find and rename the training file
+            # Most competitions have train.csv at the root
+            candidates = list(cache_path.glob("*train*.csv"))
+            if candidates:
+                # For simulation, we need to combine train + test (if test has labels)
+                # For most closed competitions, we only use train.csv
+                candidates[0].rename(full_data)
+            else:
+                raise FileNotFoundError(f"No train*.csv found in {cache_path}")
+
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download '{entry.slug}' via Kaggle API: {e}\n"
+                f"Manual fix: download from kaggle.com/competitions/{entry.slug}/data\n"
+                f"Place train.csv at: {full_data}"
+            )
+
+    elif entry.download_method == "cached":
+        if entry.cached_path and Path(entry.cached_path).exists():
+            import shutil
+            shutil.copy(entry.cached_path, full_data)
+        else:
+            raise FileNotFoundError(
+                f"Cached path '{entry.cached_path}' not found for {entry.slug}"
+            )

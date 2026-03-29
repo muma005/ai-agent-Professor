@@ -1,1 +1,1 @@
-"""Tests for the Professor Simulator."""
+# Simulator tests

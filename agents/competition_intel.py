@@ -6,7 +6,8 @@ import time
 import logging
 import datetime
 from pathlib import Path
-from kaggle.api.kaggle_api_extended import KaggleApi
+# Kaggle import is lazy (inside _fetch_notebooks) to avoid exit(1) on import
+# when credentials are missing (e.g. CI environments).
 from core.state import ProfessorState
 from tools.llm_client import call_llm
 from core.lineage import log_event
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _fetch_notebooks(competition: str) -> list:
     """Fetch top public notebooks via Kaggle API."""
+    from kaggle.api.kaggle_api_extended import KaggleApi
     api = KaggleApi()
     api.authenticate()
     

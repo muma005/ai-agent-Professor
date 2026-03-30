@@ -7,7 +7,7 @@ repos:
     rev: 24.3.0
     hooks:
       - id: black
-        language_version: python3.11
+        language_version: python3
         args: [--line-length=100, --target-version=py311]
 
   # ── isort: Import Sorting ───────────────────────────────────────
@@ -99,7 +99,7 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-        args: [tests/, -v, --tb=short]
+        args: [tests/, -v, -m, "not integration and not slow", --tb=short]
 
   # ── Coverage: Ensure Test Coverage ──────────────────────────────
   - repo: local
@@ -110,4 +110,4 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-        stages: [push]
+        stages: [pre-push]

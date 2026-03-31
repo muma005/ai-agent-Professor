@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime
 
 # ── Modal Image: built once, cached ──
+# Only upload simulator/ and core/ to minimize upload time
 professor_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -28,7 +29,13 @@ professor_image = (
         "kaggle>=1.6", "psutil>=5.9", "mlflow>=2.0",
         "langgraph>=0.2", "python-dotenv>=1.0",
     )
-    .add_local_dir(".", remote_path="/root/professor-agent")
+    .add_local_dir("simulator", remote_path="/root/professor-agent/simulator")
+    .add_local_dir("core", remote_path="/root/professor-agent/core")
+    .add_local_dir("agents", remote_path="/root/professor-agent/agents")
+    .add_local_dir("adapters", remote_path="/root/professor-agent/adapters")
+    .add_local_dir("guards", remote_path="/root/professor-agent/guards")
+    .add_local_dir("memory", remote_path="/root/professor-agent/memory")
+    .add_local_dir("tools", remote_path="/root/professor-agent/tools")
 )
 
 # ── Persistent Volume: competition data cached across runs ──

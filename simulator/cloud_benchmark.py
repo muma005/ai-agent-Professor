@@ -92,18 +92,20 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
     # Create leaderboard
     lb = SimulatedLeaderboard(entry, split)
 
-    # Configure for benchmark mode
+    # Configure for benchmark mode - FORCE fast mode defaults
     fast_config = {
         "optuna_trials": 30,
         "null_importance_shuffles": 5,
         "max_submissions": 1,
         "skip_forum_scrape": True,
+        "timeout_per_trial": 30,  # seconds
     }
     deep_config = {
         "optuna_trials": 200,
         "null_importance_shuffles": 50,
         "max_submissions": 3,
         "skip_forum_scrape": False,
+        "timeout_per_trial": 60,
     }
     config = fast_config if mode == "fast" else deep_config
 
@@ -118,6 +120,11 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
         session_id = f"benchmark_{entry.slug}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
         output_dir = f"/data/outputs/{session_id}"
         os.makedirs(output_dir, exist_ok=True)
+        
+        # FORCE environment variables for fast execution
+        os.environ["PROFESSOR_FAST_MODE"] = "1"
+        os.environ["PROFESSOR_OPTUNA_TRIALS"] = str(config["optuna_trials"])
+        os.environ["PROFESSOR_NULL_IMPORTANCE_SHUFFLES"] = str(config["null_importance_shuffles"])
 
         # Create schema.json (what DataEngineer would produce)
         import polars as pl
@@ -201,8 +208,11 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
 
         # Reveal scores
         final = lb.competition_end()
-
-        return {
+        
+        runtime = time.time() - start
+        
+        # Build result
+        result_dict = {
             "slug": entry.slug,
             "task_type": entry.task_type,
             "domain": entry.primary_domain,
@@ -219,19 +229,48 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
             "mode": mode,
             "error": None,
         }
+        
+        # PRINT RESULTS TO CONSOLE (so we see them before timeout)
+        print("\n" + "="*70)
+        print(f"  BENCHMARK COMPLETE: {entry.slug}")
+        print("="*70)
+        print(f"  CV Score:           {result_dict['cv_score']}")
+        print(f"  Public Score:       {result_dict['public_score']}")
+        print(f"  Private Score:      {result_dict['private_score']}")
+        print(f"  Public Percentile:  {result_dict['public_percentile']}%")
+        print(f"  Private Percentile: {result_dict['private_percentile']}%")
+        print(f"  Shakeup:            {result_dict['shakeup']:+.1f} positions")
+        print(f"  Medal:              {result_dict['medal'].upper()}")
+        print(f"  Runtime:            {result_dict['runtime_seconds']:.0f}s ({result_dict['runtime_seconds']/60:.1f} min)")
+        print("="*70 + "\n")
+        
+        # Save to volume
+        import json
+        result_path = f"{output_dir}/benchmark_result.json"
+        with open(result_path, "w") as f:
+            json.dump(result_dict, f, indent=2)
+        
+        data_volume.commit()
+        
+        return result_dict
 
     except Exception as e:
         import traceback
-        return {
+        result_dict = {
             "slug": entry.slug,
             "error": str(e),
             "traceback": traceback.format_exc(),
             "runtime_seconds": round(time.time() - start, 1),
             "mode": mode,
         }
-
-    finally:
-        data_volume.commit()
+        
+        # Print error
+        print(f"\n{'='*70}")
+        print(f"  BENCHMARK FAILED: {entry.slug}")
+        print(f"  Error: {str(e)[:200]}")
+        print(f"{'='*70}\n")
+        
+        return result_dict
 
 
 @app.function(

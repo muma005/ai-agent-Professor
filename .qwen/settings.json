@@ -9,7 +9,9 @@
       "Bash(git push *)",
       "Bash(tasklist *)",
       "Bash(dir *)",
-      "Bash(type *)"
+      "Bash(type *)",
+      "Bash(timeout *)",
+      "Bash(findstr *)"
     ]
   },
   "$version": 3

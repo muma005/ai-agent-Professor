@@ -1,0 +1,16 @@
+{
+  "trial": 1,
+  "slug": "spaceship-titanic",
+  "task_type": "binary",
+  "metric": "accuracy",
+  "cv_score": 0.8678299270927698,
+  "cv_std": 0.008252078430378663,
+  "public_score": 0.7825670498084292,
+  "private_score": 0.8047677764077271,
+  "public_percentile": 50.0,
+  "private_percentile": 25.0,
+  "shakeup": -25.0,
+  "medal": "bronze",
+  "runtime_seconds": 4.8,
+  "error": null
+}

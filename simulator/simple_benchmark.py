@@ -95,37 +95,54 @@ def run_single_trial(
         # Get features (exclude target and ID)
         feature_cols = [c for c in train_df.columns if c not in [target, id_col]]
 
-        # Encode categoricals
+        # Prepare data - DON'T encode yet, do it inside CV
+        # Just identify which columns need encoding
+        categorical_cols = []
         for col in feature_cols:
             if train_df[col].dtype in [pl.Utf8, pl.Categorical, pl.Boolean]:
-                # Label encode
-                unique_vals = train_df[col].unique().to_list()
-                val_to_idx = {v: i for i, v in enumerate(unique_vals)}
-                train_df = train_df.with_columns(
-                    pl.col(col).replace_strict(val_to_idx, default=None).alias(f"{col}_enc")
-                )
-                test_df = test_df.with_columns(
-                    pl.col(col).replace_strict(val_to_idx, default=-1).alias(f"{col}_enc")
-                )
-                feature_cols[feature_cols.index(col)] = f"{col}_enc"
-
-        # Prepare data
-        X = train_df[feature_cols].to_numpy()
+                categorical_cols.append(col)
+        
+        # Prepare numpy arrays (will handle categoricals inside CV)
+        X_base = train_df[feature_cols].to_numpy()
         y = train_df[target].to_numpy()
-        X_test = test_df[feature_cols].to_numpy()
+        X_test_base = test_df[feature_cols].to_numpy()
 
-        # Handle NaN
-        X = np.nan_to_num(X, nan=-999)
-        X_test = np.nan_to_num(X_test, nan=-999)
+        # Handle NaN in base data
+        X_base = np.nan_to_num(X_base, nan=-999)
+        X_test_base = np.nan_to_num(X_test_base, nan=-999)
 
-        # Simple CV
+        # Simple CV with proper preprocessing INSIDE folds
+        from sklearn.preprocessing import LabelEncoder
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         cv_scores = []
 
-        for fold, (train_idx, val_idx) in enumerate(cv.split(X, y)):
-            X_tr, X_val = X[train_idx], X[val_idx]
+        for fold, (train_idx, val_idx) in enumerate(cv.split(X_base, y)):
+            X_tr_base, X_val_base = X_base[train_idx], X_base[val_idx]
             y_tr, y_val = y[train_idx], y[val_idx]
-
+            
+            # Copy for encoding
+            X_tr = X_tr_base.copy()
+            X_val = X_val_base.copy()
+            
+            # Fit encoders on TRAIN fold only, transform both train and val
+            encoders = []
+            for i, col in enumerate(feature_cols):
+                if col in categorical_cols:
+                    le = LabelEncoder()
+                    # Fit on train only
+                    train_vals = X_tr[:, i].astype(str)
+                    le.fit(train_vals)
+                    encoders.append((i, le))
+                    
+                    # Transform train
+                    X_tr[:, i] = le.transform(train_vals)
+                    
+                    # Transform val (unknown values get -1)
+                    val_vals = X_val[:, i].astype(str)
+                    mask_known = np.isin(val_vals, le.classes_)
+                    X_val[:, i] = -1  # Default to -1 for unknown
+                    X_val[mask_known, i] = le.transform(val_vals[mask_known])
+            
             model = lgb.LGBMClassifier(
                 n_estimators=100,
                 learning_rate=0.1,
@@ -142,7 +159,25 @@ def run_single_trial(
         cv_mean = float(np.mean(cv_scores))
         cv_std = float(np.std(cv_scores))
 
-        # Train final model
+        # Train final model with proper encoding
+        # Fit encoders on FULL train set, transform train and test
+        X_tr_final = X_base.copy()
+        X_test_final = X_test_base.copy()
+        
+        for i, col in enumerate(feature_cols):
+            if col in categorical_cols:
+                le = LabelEncoder()
+                train_vals = X_tr_final[:, i].astype(str)
+                le.fit(train_vals)
+                
+                X_tr_final[:, i] = le.transform(train_vals)
+                
+                # Transform test (unknown values get -1)
+                test_vals = X_test_final[:, i].astype(str)
+                mask_known = np.isin(test_vals, le.classes_)
+                X_test_final[:, i] = -1  # Default to -1 for unknown
+                X_test_final[mask_known, i] = le.transform(test_vals[mask_known])
+
         final_model = lgb.LGBMClassifier(
             n_estimators=100,
             learning_rate=0.1,
@@ -150,10 +185,10 @@ def run_single_trial(
             random_state=42,
             verbose=-1
         )
-        final_model.fit(X, y)
+        final_model.fit(X_tr_final, y)
 
         # Predict on test
-        test_pred_proba = final_model.predict_proba(X_test)[:, 1]
+        test_pred_proba = final_model.predict_proba(X_test_final)[:, 1]
         
         # Convert to binary for classification
         if entry.task_type == "binary":

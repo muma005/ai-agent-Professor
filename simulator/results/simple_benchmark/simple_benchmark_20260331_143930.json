@@ -1,0 +1,28 @@
+{
+  "run_id": "simple_benchmark_20260331_143930",
+  "timestamp": "2026-03-31T14:39:30.243606",
+  "trials_per_competition": 1,
+  "n_competitions": 1,
+  "n_successful": 0,
+  "n_failed": 1,
+  "total_runtime_seconds": 1.2,
+  "aggregate_metrics": {
+    "median_percentile": null,
+    "mean_percentile": null,
+    "std_percentile": null,
+    "gold_rate": 0,
+    "silver_rate": 0,
+    "bronze_rate": 0,
+    "medal_rate": 0
+  },
+  "per_competition_summary": {},
+  "all_trials": [
+    {
+      "trial": 1,
+      "slug": "spaceship-titanic",
+      "error": "y contains previously unseen labels: np.str_('F/0/P')",
+      "traceback": "Traceback (most recent call last):\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\utils\\_encode.py\", line 229, in _encode\n    return _map_to_integer(values, uniques)\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\utils\\_encode.py\", line 168, in _map_to_integer\n    return xp.asarray([table[v] for v in values], device=device(values))\n                       ~~~~~^^^\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\utils\\_encode.py\", line 161, in __missing__\n    raise KeyError(key)\nKeyError: np.str_('F/0/P')\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 144, in run_single_trial\n    le.transform(val_vals),\n    ~~~~~~~~~~~~^^^^^^^^^^\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\preprocessing\\_label.py\", line 144, in transform\n    return _encode(y, uniques=self.classes_)\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\utils\\_encode.py\", line 231, in _encode\n    raise ValueError(f\"y contains previously unseen labels: {e}\")\nValueError: y contains previously unseen labels: np.str_('F/0/P')\n",
+      "runtime_seconds": 1.1
+    }
+  ]
+}

@@ -187,7 +187,7 @@ class SimulatedLeaderboard:
             selected_submission_1=best_public.submission_id,
             public_rank_pct=public_pct,
             private_rank_pct=private_pct,
-            shakeup=shakeup,
+            shakeup_positions=shakeup,
             medal=self._compute_medal(best_private_score),
             total_submissions=len(self.submissions),
             days_used=self.current_day,

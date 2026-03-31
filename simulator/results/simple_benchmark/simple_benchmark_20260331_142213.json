@@ -1,0 +1,161 @@
+{
+  "run_id": "simple_benchmark_20260331_142213",
+  "timestamp": "2026-03-31T14:22:13.296691",
+  "trials_per_competition": 20,
+  "n_competitions": 1,
+  "n_successful": 0,
+  "n_failed": 20,
+  "total_runtime_seconds": 8.5,
+  "aggregate_metrics": {
+    "median_percentile": null,
+    "mean_percentile": null,
+    "std_percentile": null,
+    "gold_rate": 0,
+    "silver_rate": 0,
+    "bronze_rate": 0,
+    "medal_rate": 0
+  },
+  "per_competition_summary": {},
+  "all_trials": [
+    {
+      "trial": 1,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 1.6
+    },
+    {
+      "trial": 2,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.7
+    },
+    {
+      "trial": 3,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.4
+    },
+    {
+      "trial": 4,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 5,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 6,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.4
+    },
+    {
+      "trial": 7,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 8,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.4
+    },
+    {
+      "trial": 9,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 10,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 11,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 12,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 13,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.4
+    },
+    {
+      "trial": 14,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 15,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.4
+    },
+    {
+      "trial": 16,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.4
+    },
+    {
+      "trial": 17,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 18,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 19,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    },
+    {
+      "trial": 20,
+      "slug": "spaceship-titanic",
+      "error": "StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 122, in run_single_trial\n    cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)\nTypeError: StratifiedKFold.__init__() got an unexpected keyword argument 'random_seed'. Did you mean 'random_state'?\n",
+      "runtime_seconds": 0.3
+    }
+  ]
+}

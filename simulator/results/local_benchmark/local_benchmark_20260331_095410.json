@@ -1,0 +1,205 @@
+{
+  "run_id": "local_benchmark_20260331_095410",
+  "professor_version": "v2.0",
+  "timestamp": "2026-03-31T09:54:10.413758",
+  "mode": "fast",
+  "trials_per_competition": 30,
+  "n_competitions": 1,
+  "n_successful": 0,
+  "n_failed": 30,
+  "total_runtime_seconds": 1.0,
+  "aggregate_metrics": {
+    "median_percentile": null,
+    "mean_percentile": null,
+    "std_percentile": null,
+    "min_percentile": null,
+    "max_percentile": null,
+    "gold_rate": 0,
+    "silver_rate": 0,
+    "bronze_rate": 0,
+    "medal_rate": 0
+  },
+  "per_competition_summary": {},
+  "all_trials": [
+    {
+      "trial": 1,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 2,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 3,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 4,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 5,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 6,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 7,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 8,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 9,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 10,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 11,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 12,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 13,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 14,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 15,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 16,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 17,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 18,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 19,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 20,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 21,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 22,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 23,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 24,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 25,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 26,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 27,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 28,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 29,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    },
+    {
+      "trial": 30,
+      "slug": "spaceship-titanic",
+      "error": "Data file not found: simulator/data/competitions/spaceship-titanic/full_data.csv",
+      "runtime_seconds": 0
+    }
+  ]
+}

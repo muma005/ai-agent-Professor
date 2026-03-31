@@ -119,7 +119,7 @@ def run_single_trial(
         X_test = np.nan_to_num(X_test, nan=-999)
 
         # Simple CV
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_seed=42)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         cv_scores = []
 
         for fold, (train_idx, val_idx) in enumerate(cv.split(X, y)):
@@ -153,7 +153,13 @@ def run_single_trial(
         final_model.fit(X, y)
 
         # Predict on test
-        test_pred = final_model.predict_proba(X_test)[:, 1]
+        test_pred_proba = final_model.predict_proba(X_test)[:, 1]
+        
+        # Convert to binary for classification
+        if entry.task_type == "binary":
+            test_pred = (test_pred_proba > 0.5).astype(int)
+        else:
+            test_pred = test_pred_proba
 
         # Create submission
         submission_df = test_df.select(id_col).with_columns(

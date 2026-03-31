@@ -44,6 +44,12 @@ if not _USE_DOCKER:
         "Install Docker Desktop for full isolation."
     )
 
+# ── P1.2 FIX: Fallback mode - skip sandbox for local development ────
+_SKIP_SANDBOX = os.getenv("PROFESSOR_SKIP_SANDBOX", "0") == "1"
+
+if _SKIP_SANDBOX:
+    logger.warning("[sandbox] SKIP_SANDBOX=1 — executing code directly (DEV MODE)")
+
 # ── Polars preamble injected before every generated script ─────────
 SANDBOX_PREAMBLE = """\
 import polars as pl
@@ -59,18 +65,21 @@ import os
 """
 
 # ── Allowed imports inside sandbox ────────────────────────────────
+# P1.1 FIX: Added sys, multiprocessing, pickle, re, typing for ML code compatibility
 ALLOWED_MODULES = {
-    "polars", "numpy", "json", "os", "math",
+    "polars", "numpy", "json", "os", "math", "sys",
     "sklearn", "lightgbm", "xgboost", "catboost",
     "optuna", "scipy", "statistics", "itertools",
-    "collections", "functools", "datetime", "pathlib"
+    "collections", "functools", "datetime", "pathlib",
+    "multiprocessing", "pickle", "re", "typing",
 }
 
 # ── Blocked modules — never allow these from generated code ───────
+# P1.1 FIX: Removed sys, multiprocessing from blocked list
 BLOCKED_MODULES = {
     "subprocess", "shutil", "socket", "http", "urllib",
-    "ftplib", "smtplib", "ctypes", "multiprocessing",
-    "signal", "pty", "resource", "sys",
+    "ftplib", "smtplib", "ctypes",
+    "signal", "pty", "resource",
 }
 
 SANDBOX_TIMEOUT_S = 600  # 10 minutes
@@ -410,3 +419,62 @@ def run_in_sandbox(code: str, timeout: int = SANDBOX_TIMEOUT_S,
 def run_in_subprocess_sandbox(code: str, timeout: int = SANDBOX_TIMEOUT_S, **kwargs) -> dict:
     """Alias for run_in_sandbox — used as fallback target in service_health.py."""
     return run_in_sandbox(code, timeout=timeout, **kwargs)
+
+
+# ── P1.2 FIX: Safe execution with fallback mode ─────────────────────────
+def execute_code_safe(code: str, timeout: int = SANDBOX_TIMEOUT_S, **kwargs):
+    """
+    Execute code with sandbox if available, otherwise execute directly.
+    Respects PROFESSOR_SKIP_SANDBOX environment variable.
+    
+    Use this instead of execute_code() for local development.
+    
+    Args:
+        code: Python code to execute
+        timeout: Timeout in seconds
+        **kwargs: Additional arguments passed to execute_code()
+    
+    Returns:
+        dict with keys: success, stdout, stderr, result, error, traceback
+    """
+    if _SKIP_SANDBOX:
+        # Direct execution (DEV MODE - not for production)
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+        
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        
+        try:
+            # Create safe globals with allowed modules
+            safe_globals = {
+                "__builtins__": __builtins__,
+            }
+            # Import allowed modules
+            for module_name in ALLOWED_MODULES:
+                try:
+                    module = __import__(module_name)
+                    safe_globals[module_name] = module
+                except ImportError:
+                    pass
+            
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                exec(code, safe_globals, {})
+            
+            return {
+                "success": True,
+                "stdout": stdout_capture.getvalue(),
+                "stderr": stderr_capture.getvalue(),
+                "result": None,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "stdout": stdout_capture.getvalue(),
+                "stderr": stderr_capture.getvalue(),
+            }
+    else:
+        # Use actual sandbox
+        return execute_code(code, timeout=timeout, **kwargs)

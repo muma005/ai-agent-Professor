@@ -243,42 +243,67 @@ def ensure_data_cached(entry: CompetitionEntry, cache_dir: str):
     """
     Download competition data if not already cached.
     Uses Kaggle API. Falls back to manual instruction if API fails.
+    
+    Data is stored at: {cache_dir}/{competition_slug}/full_data.csv
     """
     cache_path = Path(cache_dir) / entry.slug
     full_data = cache_path / "full_data.csv"
 
     if full_data.exists():
+        print(f"[INFO] Data already cached: {full_data}")
         return  # already cached
 
+    print(f"[INFO] Downloading '{entry.slug}' from Kaggle...")
     cache_path.mkdir(parents=True, exist_ok=True)
 
     if entry.download_method == "kaggle_api":
-        import subprocess
         try:
-            subprocess.run(
-                ["kaggle", "competitions", "download", "-c", entry.slug, "-p", str(cache_path)],
-                check=True, capture_output=True, text=True, timeout=120,
-            )
-            # Unzip if needed
+            from kaggle.api.kaggle_api_extended import KaggleApi
+            
+            # Initialize API (reads credentials from env vars or ~/.kaggle/kaggle.json)
+            api = KaggleApi()
+            api.authenticate()
+            
+            # Download competition data
+            api.competition_download_files(entry.slug, path=str(cache_path))
+            
+            # Unzip all zip files
             import zipfile
             for zf in cache_path.glob("*.zip"):
+                print(f"[INFO] Extracting: {zf.name}")
                 with zipfile.ZipFile(zf, "r") as z:
                     z.extractall(cache_path)
                 zf.unlink()
 
-            # Find and rename the training file
-            # Most competitions have train.csv at the root
-            candidates = list(cache_path.glob("*train*.csv"))
+            # Find the training file - try multiple patterns
+            candidates = (
+                list(cache_path.glob("train.csv")) +
+                list(cache_path.glob("*train*.csv")) +
+                list(cache_path.glob("*.csv"))
+            )
+            
             if candidates:
-                # For simulation, we need to combine train + test (if test has labels)
-                # For most closed competitions, we only use train.csv
-                candidates[0].rename(full_data)
+                # Use the first CSV found, prefer ones with 'train' in name
+                train_file = next((c for c in candidates if "train" in c.name.lower()), candidates[0])
+                print(f"[INFO] Found training file: {train_file.name}")
+                
+                # Copy to full_data.csv (don't rename, keep original)
+                import shutil
+                shutil.copy(train_file, full_data)
+                print(f"[INFO] Data cached: {full_data}")
             else:
-                raise FileNotFoundError(f"No train*.csv found in {cache_path}")
+                raise FileNotFoundError(f"No CSV files found in {cache_path}")
 
+        except ImportError:
+            raise RuntimeError(
+                f"kaggle package not installed. Run: pip install kaggle\n"
+                f"Manual fix: download from https://www.kaggle.com/competitions/{entry.slug}/data\n"
+                f"Place train.csv at: {full_data}"
+            )
         except Exception as e:
             raise RuntimeError(
-                f"Failed to download '{entry.slug}' via Kaggle API: {e}\n"
+                f"Error downloading '{entry.slug}': {e}\n"
+                f"Make sure KAGGLE_USERNAME and KAGGLE_KEY are set in environment.\n"
                 f"Manual fix: download from kaggle.com/competitions/{entry.slug}/data\n"
                 f"Place train.csv at: {full_data}"
             )
@@ -287,6 +312,7 @@ def ensure_data_cached(entry: CompetitionEntry, cache_dir: str):
         if entry.cached_path and Path(entry.cached_path).exists():
             import shutil
             shutil.copy(entry.cached_path, full_data)
+            print(f"[INFO] Copied cached data: {full_data}")
         else:
             raise FileNotFoundError(
                 f"Cached path '{entry.cached_path}' not found for {entry.slug}"

@@ -1214,12 +1214,20 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     """
     from tools.stability_validator import run_with_seeds, rank_by_stability, format_stability_report
     from tools.wilcoxon_gate import gate_result
+    from core.config import ProfessorConfig
 
+    # P4.4 FIX: Load config for optuna_trials
+    config = state.get("config", ProfessorConfig.from_env())
+    n_trials = config.ml_optimizer.optuna_trials
+    models_to_try = config.ml_optimizer.models_to_try
+    cv_folds = config.ml_optimizer.cv_folds
+    
     session_id  = state["session_id"]
     output_dir  = f"outputs/{session_id}"
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"[MLOptimizer] Starting — session: {session_id}")
+    print(f"[MLOptimizer] Config: {n_trials} trials, models={models_to_try}, cv_folds={cv_folds}")
 
     if state.get("hitl_required"):
         print("[MLOptimizer] HALTED: hitl_required flag is set.")
@@ -1312,9 +1320,11 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
 
     # ── Phase 1: Optuna study ─────────────────────────────────────
     direction = _get_study_direction(metric)
-    # Dynamic scaling for tiny datasets: 3 trials per 100 rows
-    n_trials = min(N_OPTUNA_TRIALS, max(3, int(len(y) * 0.03)))
-        
+    # P4.4 FIX: Use config n_trials instead of hardcoded N_OPTUNA_TRIALS
+    # Dynamic scaling for tiny datasets: 3 trials per 100 rows, but respect config minimum
+    n_trials_dynamic = max(3, int(len(y) * 0.03))
+    n_trials = max(n_trials, n_trials_dynamic)  # Use config value as minimum
+
     print(f"[MLOptimizer] Running Optuna ({n_trials} trials, direction={direction}, mem limit={MAX_MEMORY_GB}GB)...")
 
     study = optuna.create_study(

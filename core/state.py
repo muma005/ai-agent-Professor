@@ -205,6 +205,9 @@ class ProfessorState(TypedDict):
     external_data_allowed: bool
     external_data_manifest: dict
 
+    # -- Configuration (Phase 2) -----------------------------------
+    config: Optional["ProfessorConfig"]
+
     # ── Output ────────────────────────────────────────────────────
     report_path: Optional[str]
     lineage_log_path: Optional[str]
@@ -214,10 +217,32 @@ def initial_state(
     competition: str,
     data_path: str,
     budget_usd: float = 2.00,
-    task_type: str = "unknown"
+    task_type: str = "unknown",
+    config: Optional["ProfessorConfig"] = None,
 ) -> ProfessorState:
-    """Create a fresh state for a new competition run."""
-
+    """
+    Create a fresh state for a new competition run.
+    
+    Args:
+        competition: Competition name (e.g., "spaceship-titanic")
+        data_path: Path to training data
+        budget_usd: API budget in USD
+        task_type: Task type ("binary", "multiclass", "regression", etc.)
+        config: ProfessorConfig instance. If None, loads from environment.
+    
+    Returns:
+        ProfessorState initialized with default values
+    """
+    # Import here to avoid circular dependency
+    from core.config import ProfessorConfig
+    
+    # Load config from parameter or environment
+    if config is None:
+        config = ProfessorConfig.from_env()
+    
+    # Apply config to environment (ensures all components see it)
+    config.apply_env()
+    
     session_id = f"{competition[:8].replace(' ', '_')}_{uuid.uuid4().hex[:8]}"
 
     return ProfessorState(
@@ -363,4 +388,6 @@ def initial_state(
         # -- External Data Scout (Day 15) --
         external_data_allowed=False,
         external_data_manifest={},
+        # -- Configuration (Phase 2) --
+        config=config,
     )

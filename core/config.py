@@ -1,461 +1,318 @@
 # core/config.py
-
 """
-Centralized configuration management for Professor pipeline.
+Professor Configuration System — Centralized control for all execution parameters.
 
-FLAW-2.7 FIX: Configuration Management
-- Centralized configuration with validation
-- Environment variable integration
-- Type-safe configuration objects
-- Configuration documentation
-- Default values with overrides
+Usage:
+    config = ProfessorConfig(fast_mode=True)
+    state = config.apply_to_state(initial_state)
+    result = run_professor(state)
+
+Presets:
+    fast_mode=True       → Local development, ~5 min/trial
+    production_mode=True → Full execution, ~1 hour/trial
+    custom               → Mix and match options
 """
 
 import os
-import json
-import logging
+from dataclasses import dataclass, field, asdict
+from typing import List, Optional
 from pathlib import Path
-from typing import Optional, List, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field, validator, ValidationError
-
-logger = logging.getLogger(__name__)
 
 
-class PerformanceConfig(BaseModel):
-    """Performance-related configuration."""
-    
-    max_memory_gb: float = Field(
-        default=6.0,
-        gt=0,
-        le=32,
-        description="Maximum memory usage in GB",
-    )
-    timeout_seconds: int = Field(
-        default=600,
-        gt=0,
-        le=3600,
-        description="Pipeline timeout in seconds",
-    )
-    max_parallel_jobs: int = Field(
-        default=4,
-        gt=0,
-        le=16,
-        description="Maximum parallel jobs",
-    )
-    gc_threshold_gb: float = Field(
-        default=4.0,
-        gt=0,
-        le=32,
-        description="GC trigger threshold in GB",
-    )
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "max_memory_gb": 6.0,
-                "timeout_seconds": 600,
-                "max_parallel_jobs": 4,
-            }
-        }
-
-
-class BudgetConfig(BaseModel):
-    """Budget-related configuration."""
-    
-    budget_usd: float = Field(
-        default=10.0,
-        gt=0,
-        description="Total budget in USD",
-    )
-    warning_threshold: float = Field(
-        default=0.7,
-        gt=0,
-        le=1,
-        description="Warning threshold (0.0-1.0)",
-    )
-    throttle_threshold: float = Field(
-        default=0.85,
-        gt=0,
-        le=1,
-        description="Throttle threshold (0.0-1.0)",
-    )
-    triage_threshold: float = Field(
-        default=0.95,
-        gt=0,
-        le=1,
-        description="Triage threshold (0.0-1.0)",
-    )
-    
-    @validator("throttle_threshold")
-    def validate_throttle(cls, v, values):
-        if "warning_threshold" in values and v <= values["warning_threshold"]:
-            raise ValueError("throttle_threshold must be > warning_threshold")
-        return v
-    
-    @validator("triage_threshold")
-    def validate_triage(cls, v, values):
-        if "throttle_threshold" in values and v <= values["throttle_threshold"]:
-            raise ValueError("triage_threshold must be > throttle_threshold")
-        return v
-
-
-class ModelConfig(BaseModel):
-    """Model training configuration."""
-    
-    default_cv_folds: int = Field(
-        default=5,
-        gt=2,
-        le=10,
-        description="Default CV folds",
-    )
-    optuna_trials: int = Field(
-        default=100,
-        gt=10,
-        le=1000,
-        description="Optuna trial count",
-    )
-    optuna_timeout_minutes: int = Field(
-        default=30,
-        gt=1,
-        le=120,
-        description="Optuna timeout in minutes",
-    )
-    random_seed: int = Field(
-        default=42,
-        ge=0,
-        description="Random seed for reproducibility",
-    )
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "default_cv_folds": 5,
-                "optuna_trials": 100,
-                "random_seed": 42,
-            }
-        }
-
-
-class APIConfig(BaseModel):
-    """API-related configuration."""
-    
-    llm_provider: str = Field(
-        default="deepseek",
-        description="Default LLM provider",
-    )
-    api_timeout_multiplier: float = Field(
-        default=2.0,
-        gt=0,
-        description="API timeout multiplier",
-    )
-    api_backoff_enabled: bool = Field(
-        default=True,
-        description="Enable API backoff",
-    )
-    api_max_retries: int = Field(
-        default=5,
-        gt=0,
-        le=10,
-        description="Maximum API retries",
-    )
-    debug_logging: bool = Field(
-        default=False,
-        description="Enable debug logging",
-    )
-
-
-class ProfessorConfig(BaseModel):
+@dataclass
+class SandboxConfig:
     """
-    Main Professor pipeline configuration.
+    Sandbox execution configuration.
     
-    All configuration options are validated and documented.
-    Load from environment variables or use defaults.
+    Attributes:
+        enabled: If False, executes code directly (faster, less isolated)
+        timeout_seconds: Maximum execution time for sandbox code
+        skip_import_validation: If True, allows any import (DEV MODE)
     """
+    enabled: bool = True
+    timeout_seconds: int = 600
+    skip_import_validation: bool = False
     
-    # Identity
-    session_id: str = Field(
-        default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"),
-        description="Unique session identifier",
-    )
-    competition_name: str = Field(
-        default="unknown",
-        min_length=1,
-        description="Competition name",
-    )
+    def apply_env(self):
+        """Apply config to environment variables"""
+        os.environ["PROFESSOR_USE_SANDBOX"] = "1" if self.enabled else "0"
+        os.environ["PROFESSOR_SANDBOX_TIMEOUT"] = str(self.timeout_seconds)
+        os.environ["PROFESSOR_SKIP_SANDBOX"] = "1" if not self.enabled else "0"
+
+
+@dataclass
+class FeatureFactoryConfig:
+    """
+    Feature generation configuration.
     
-    # Sub-configurations
-    performance: PerformanceConfig = Field(
-        default_factory=PerformanceConfig,
-        description="Performance settings",
-    )
-    budget: BudgetConfig = Field(
-        default_factory=BudgetConfig,
-        description="Budget settings",
-    )
-    model: ModelConfig = Field(
-        default_factory=ModelConfig,
-        description="Model training settings",
-    )
-    api: APIConfig = Field(
-        default_factory=APIConfig,
-        description="API settings",
-    )
+    Attributes:
+        enabled: If False, skip feature factory entirely
+        skip_llm_rounds: Skip rounds 2, 5 (LLM-generated features)
+        skip_wilcoxon_gate: Skip statistical testing of features
+        skip_null_importance: Skip null importance filtering
+        max_interaction_features: Max features from interactions
+        max_aggregation_features: Max aggregation features
+    """
+    enabled: bool = True
+    skip_llm_rounds: bool = False
+    skip_wilcoxon_gate: bool = False
+    skip_null_importance: bool = False
+    max_interaction_features: int = 20
+    max_aggregation_features: int = 50
     
-    # Cache settings
-    cache_enabled: bool = Field(
-        default=True,
-        description="Enable caching",
-    )
-    cache_ttl_hours: int = Field(
-        default=24,
-        gt=0,
-        le=168,
-        description="Cache TTL in hours",
-    )
+    def apply_env(self):
+        """Apply config to environment variables"""
+        os.environ["PROFESSOR_SKIP_LLM_ROUNDS"] = "1" if self.skip_llm_rounds else "0"
+        os.environ["PROFESSOR_SKIP_WILCOXON"] = "1" if self.skip_wilcoxon_gate else "0"
+        os.environ["PROFESSOR_SKIP_NULL_IMPORTANCE"] = "1" if self.skip_null_importance else "0"
+
+
+@dataclass
+class MLOptimizerConfig:
+    """
+    Model optimization configuration.
     
-    # Feature flags
-    enable_pseudo_labeling: bool = Field(
-        default=False,
-        description="Enable pseudo-labeling",
-    )
-    enable_ensemble: bool = Field(
-        default=True,
-        description="Enable ensemble",
-    )
-    enable_external_data: bool = Field(
-        default=False,
-        description="Enable external data",
-    )
+    Attributes:
+        optuna_trials: Number of Optuna hyperparameter trials
+        models_to_try: List of model types to optimize
+        cv_folds: Number of cross-validation folds
+        timeout_per_trial: Timeout per Optuna trial in seconds
+    """
+    optuna_trials: int = 30  # Reduced from 100 for fast mode
+    models_to_try: List[str] = field(default_factory=lambda: ["lgbm"])
+    cv_folds: int = 5
+    timeout_per_trial: int = 300
     
-    class Config:
-        schema_extra = {
-            "title": "Professor Configuration",
-            "description": "Complete configuration for Professor pipeline",
-        }
+    def apply_env(self):
+        """Apply config to environment variables"""
+        os.environ["PROFESSOR_OPTUNA_TRIALS"] = str(self.optuna_trials)
+        os.environ["PROFESSOR_MODELS"] = ",".join(self.models_to_try)
+        os.environ["PROFESSOR_CV_FOLDS"] = str(self.cv_folds)
+
+
+@dataclass
+class AgentSkipConfig:
+    """
+    Configuration for skipping entire agents.
+    
+    Attributes:
+        skip_competition_intel: Skip forum scraping and intel gathering
+        skip_eda: Skip exploratory data analysis
+        skip_red_team_critic: Skip critical review
+        skip_ensemble: Skip ensemble building
+        skip_pseudo_label: Skip pseudo-labeling
+    """
+    skip_competition_intel: bool = False
+    skip_eda: bool = False
+    skip_red_team_critic: bool = False
+    skip_ensemble: bool = False
+    skip_pseudo_label: bool = False
+    
+    def apply_env(self):
+        """Apply config to environment variables"""
+        os.environ["PROFESSOR_SKIP_INTEL"] = "1" if self.skip_competition_intel else "0"
+        os.environ["PROFESSOR_SKIP_EDA"] = "1" if self.skip_eda else "0"
+        os.environ["PROFESSOR_SKIP_CRITIC"] = "1" if self.skip_red_team_critic else "0"
+        os.environ["PROFESSOR_SKIP_ENSEMBLE"] = "1" if self.skip_ensemble else "0"
+
+
+@dataclass
+class ProfessorConfig:
+    """
+    Master configuration for Professor pipeline.
+    
+    Presets:
+        fast_mode=True       → Local development, ~5 min/trial
+            - Disables sandbox
+            - Skips CompetitionIntel, EDA, RedTeamCritic
+            - Skips LLM feature rounds
+            - 1 Optuna trial (defaults only)
+            - Single model (LightGBM)
+            - 3-fold CV
+        
+        production_mode=True → Full execution, ~1 hour/trial
+            - Full sandbox isolation
+            - All agents enabled
+            - 100 Optuna trials
+            - 3 models (LGBM, XGB, CatBoost)
+            - 5-fold CV
+    
+    Example:
+        config = ProfessorConfig(fast_mode=True)
+        state = config.apply_to_state(initial_state)
+        result = run_professor(state)
+    """
+    # Execution mode presets
+    fast_mode: bool = False
+    production_mode: bool = False
+    
+    # Component configs
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    feature_factory: FeatureFactoryConfig = field(default_factory=FeatureFactoryConfig)
+    ml_optimizer: MLOptimizerConfig = field(default_factory=MLOptimizerConfig)
+    agents: AgentSkipConfig = field(default_factory=AgentSkipConfig)
+    
+    # Global settings
+    seed: int = 42
+    log_level: str = "INFO"
+    checkpoint_enabled: bool = True
+    
+    def __post_init__(self):
+        """Apply presets after initialization"""
+        if self.fast_mode:
+            self._apply_fast_mode()
+        elif self.production_mode:
+            self._apply_production_mode()
+    
+    def _apply_fast_mode(self):
+        """Configure for fast local execution"""
+        # Disable sandbox overhead
+        self.sandbox.enabled = False
+        self.sandbox.skip_import_validation = True
+        
+        # Skip expensive feature generation
+        self.feature_factory.skip_llm_rounds = True
+        self.feature_factory.skip_wilcoxon_gate = True
+        self.feature_factory.skip_null_importance = True
+        
+        # Minimal model optimization
+        self.ml_optimizer.optuna_trials = 1  # Just defaults
+        self.ml_optimizer.models_to_try = ["lgbm"]  # Single model
+        self.ml_optimizer.cv_folds = 3  # Reduced CV
+        
+        # Skip non-essential agents
+        self.agents.skip_competition_intel = True
+        self.agents.skip_eda = True
+        self.agents.skip_red_team_critic = True
+        self.agents.skip_ensemble = True
+    
+    def _apply_production_mode(self):
+        """Configure for full production execution"""
+        # Full sandbox isolation
+        self.sandbox.enabled = True
+        self.sandbox.timeout_seconds = 600
+        
+        # All feature generation enabled
+        self.feature_factory.skip_llm_rounds = False
+        self.feature_factory.skip_wilcoxon_gate = False
+        self.feature_factory.skip_null_importance = False
+        
+        # Full model optimization
+        self.ml_optimizer.optuna_trials = 100
+        self.ml_optimizer.models_to_try = ["lgbm", "xgb", "catboost"]
+        self.ml_optimizer.cv_folds = 5
+        
+        # All agents enabled
+        self.agents.skip_competition_intel = False
+        self.agents.skip_eda = False
+        self.agents.skip_red_team_critic = False
+        self.agents.skip_ensemble = False
+    
+    def apply_env(self):
+        """Apply all config to environment variables"""
+        os.environ["PROFESSOR_SEED"] = str(self.seed)
+        os.environ["PROFESSOR_LOG_LEVEL"] = self.log_level
+        os.environ["PROFESSOR_CHECKPOINT"] = "1" if self.checkpoint_enabled else "0"
+        os.environ["PROFESSOR_FAST_MODE"] = "1" if self.fast_mode else "0"
+        os.environ["PROFESSOR_PRODUCTION_MODE"] = "1" if self.production_mode else "0"
+        
+        self.sandbox.apply_env()
+        self.feature_factory.apply_env()
+        self.ml_optimizer.apply_env()
+        self.agents.apply_env()
+    
+    def apply_to_state(self, state: dict) -> dict:
+        """
+        Apply config to ProfessorState.
+        
+        Modifies DAG to skip agents based on config.
+        """
+        state["config"] = self
+        
+        # Modify DAG based on config
+        if "dag" in state:
+            dag = state["dag"].copy()
+            
+            if self.agents.skip_competition_intel:
+                dag = [n for n in dag if n != "competition_intel"]
+            
+            if self.agents.skip_eda:
+                dag = [n for n in dag if n != "eda_agent"]
+            
+            if self.agents.skip_red_team_critic:
+                dag = [n for n in dag if n != "red_team_critic"]
+            
+            if self.agents.skip_ensemble:
+                dag = [n for n in dag if n != "ensemble_architect"]
+            
+            state["dag"] = dag
+        
+        return state
+    
+    def save(self, path: str):
+        """Save config to JSON for reproducibility"""
+        import json
+        
+        config_dict = asdict(self)
+        config_dict["timestamp"] = datetime.now().isoformat()
+        config_dict["version"] = "1.0.0"
+        
+        # Ensure directory exists
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(path, 'w') as f:
+            json.dump(config_dict, f, indent=2)
     
     @classmethod
     def from_env(cls) -> "ProfessorConfig":
         """
-        Load configuration from environment variables.
+        Load config from environment variables.
         
-        Environment variables override defaults.
-        Format: PROFESSOR_<SECTION>_<KEY>
-        
-        Examples:
-            PROFESSOR_COMPETITION_NAME=titanic
-            PROFESSOR_PERFORMANCE_MAX_MEMORY_GB=8.0
-            PROFESSOR_MODEL_OPTUNA_TRIALS=200
-        
-        Returns:
-            ProfessorConfig instance
+        Falls back to defaults if env vars not set.
         """
-        config_data = {}
+        config = cls()
         
-        # Top-level fields
-        if comp_name := os.environ.get("PROFESSOR_COMPETITION_NAME"):
-            config_data["competition_name"] = comp_name
+        # Check for preset modes
+        if os.getenv("PROFESSOR_FAST_MODE") == "1":
+            config.fast_mode = True
+            config._apply_fast_mode()
         
-        # Performance config
-        perf_data = {}
-        if val := os.environ.get("PROFESSOR_PERFORMANCE_MAX_MEMORY_GB"):
-            perf_data["max_memory_gb"] = float(val)
-        if val := os.environ.get("PROFESSOR_PERFORMANCE_TIMEOUT_SECONDS"):
-            perf_data["timeout_seconds"] = int(val)
-        if val := os.environ.get("PROFESSOR_PERFORMANCE_MAX_PARALLEL_JOBS"):
-            perf_data["max_parallel_jobs"] = int(val)
-        if perf_data:
-            config_data["performance"] = PerformanceConfig(**perf_data)
+        if os.getenv("PROFESSOR_PRODUCTION_MODE") == "1":
+            config.production_mode = True
+            config._apply_production_mode()
         
-        # Budget config
-        budget_data = {}
-        if val := os.environ.get("PROFESSOR_BUDGET_BUDGET_USD"):
-            budget_data["budget_usd"] = float(val)
-        if val := os.environ.get("PROFESSOR_BUDGET_WARNING_THRESHOLD"):
-            budget_data["warning_threshold"] = float(val)
-        if budget_data:
-            config_data["budget"] = BudgetConfig(**budget_data)
+        # Override individual settings from env
+        if os.getenv("PROFESSOR_OPTUNA_TRIALS"):
+            config.ml_optimizer.optuna_trials = int(os.getenv("PROFESSOR_OPTUNA_TRIALS"))
         
-        # Model config
-        model_data = {}
-        if val := os.environ.get("PROFESSOR_MODEL_DEFAULT_CV_FOLDS"):
-            model_data["default_cv_folds"] = int(val)
-        if val := os.environ.get("PROFESSOR_MODEL_OPTUNA_TRIALS"):
-            model_data["optuna_trials"] = int(val)
-        if val := os.environ.get("PROFESSOR_MODEL_RANDOM_SEED"):
-            model_data["random_seed"] = int(val)
-        if model_data:
-            config_data["model"] = ModelConfig(**model_data)
+        if os.getenv("PROFESSOR_SKIP_LLM_ROUNDS") == "1":
+            config.feature_factory.skip_llm_rounds = True
         
-        # API config
-        api_data = {}
-        if val := os.environ.get("PROFESSOR_API_LLM_PROVIDER"):
-            api_data["llm_provider"] = val
-        if val := os.environ.get("PROFESSOR_API_DEBUG_LOGGING"):
-            api_data["debug_logging"] = val.lower() == "true"
-        if api_data:
-            config_data["api"] = APIConfig(**api_data)
+        if os.getenv("PROFESSOR_SKIP_WILCOXON") == "1":
+            config.feature_factory.skip_wilcoxon_gate = True
         
-        # Cache settings
-        if val := os.environ.get("PROFESSOR_CACHE_ENABLED"):
-            config_data["cache_enabled"] = val.lower() == "true"
-        if val := os.environ.get("PROFESSOR_CACHE_TTL_HOURS"):
-            config_data["cache_ttl_hours"] = int(val)
+        if os.getenv("PROFESSOR_SKIP_EDA") == "1":
+            config.agents.skip_eda = True
         
-        # Feature flags
-        if val := os.environ.get("PROFESSOR_ENABLE_PSEUDO_LABELING"):
-            config_data["enable_pseudo_labeling"] = val.lower() == "true"
-        if val := os.environ.get("PROFESSOR_ENABLE_ENSEMBLE"):
-            config_data["enable_ensemble"] = val.lower() == "true"
+        if os.getenv("PROFESSOR_SKIP_SANDBOX") == "1":
+            config.sandbox.enabled = False
         
-        try:
-            return cls(**config_data)
-        except ValidationError as e:
-            logger.error(f"[Config] Validation error: {e}")
-            raise
+        # Load models from env
+        models_env = os.getenv("PROFESSOR_MODELS")
+        if models_env:
+            config.ml_optimizer.models_to_try = models_env.split(",")
+        
+        return config
     
-    def save(self, path: str) -> None:
-        """
-        Save configuration to JSON file.
-        
-        Args:
-            path: Path to save configuration
-        """
-        path_obj = Path(path)
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(path_obj, "w") as f:
-            json.dump(self.dict(), f, indent=2, default=str)
-        
-        logger.info(f"[Config] Configuration saved to: {path}")
-    
-    @classmethod
-    def load(cls, path: str) -> "ProfessorConfig":
-        """
-        Load configuration from JSON file.
-        
-        Args:
-            path: Path to configuration file
-        
-        Returns:
-            ProfessorConfig instance
-        """
-        path_obj = Path(path)
-        
-        if not path_obj.exists():
-            logger.warning(f"[Config] Configuration file not found: {path}")
-            return cls()
-        
-        with open(path_obj, "r") as f:
-            config_data = json.load(f)
-        
-        try:
-            return cls(**config_data)
-        except ValidationError as e:
-            logger.error(f"[Config] Validation error loading {path}: {e}")
-            raise
-    
-    def get_summary(self) -> dict:
-        """Get configuration summary."""
-        return {
-            "session_id": self.session_id,
-            "competition_name": self.competition_name,
-            "max_memory_gb": self.performance.max_memory_gb,
-            "timeout_seconds": self.performance.timeout_seconds,
-            "optuna_trials": self.model.optuna_trials,
-            "random_seed": self.model.random_seed,
-            "cache_enabled": self.cache_enabled,
-            "feature_flags": {
-                "pseudo_labeling": self.enable_pseudo_labeling,
-                "ensemble": self.enable_ensemble,
-                "external_data": self.enable_external_data,
-            },
-        }
-    
-    def log_summary(self) -> None:
-        """Log configuration summary."""
-        summary = self.get_summary()
-        
-        logger.info("=" * 70)
-        logger.info("PROFESSOR CONFIGURATION")
-        logger.info("=" * 70)
-        logger.info(f"Session: {summary['session_id']}")
-        logger.info(f"Competition: {summary['competition_name']}")
-        logger.info(f"Max Memory: {summary['max_memory_gb']} GB")
-        logger.info(f"Timeout: {summary['timeout_seconds']}s")
-        logger.info(f"Optuna Trials: {summary['optuna_trials']}")
-        logger.info(f"Random Seed: {summary['random_seed']}")
-        logger.info(f"Cache Enabled: {summary['cache_enabled']}")
-        logger.info(f"Pseudo-labeling: {summary['feature_flags']['pseudo_labeling']}")
-        logger.info(f"Ensemble: {summary['feature_flags']['ensemble']}")
-        logger.info("=" * 70)
-
-
-# Global configuration instance
-_config: Optional[ProfessorConfig] = None
-
-
-def get_config() -> ProfessorConfig:
-    """
-    Get or create global configuration instance.
-    
-    Returns:
-        ProfessorConfig instance
-    """
-    global _config
-    
-    if _config is None:
-        _config = ProfessorConfig.from_env()
-        _config.log_summary()
-    
-    return _config
-
-
-def initialize_config(
-    competition_name: str,
-    session_id: Optional[str] = None,
-    **kwargs,
-) -> ProfessorConfig:
-    """
-    Initialize configuration with custom values.
-    
-    Args:
-        competition_name: Competition name
-        session_id: Optional session ID
-        **kwargs: Additional configuration overrides
-    
-    Returns:
-        ProfessorConfig instance
-    """
-    global _config
-    
-    config_data = {
-        "competition_name": competition_name,
-    }
-    
-    if session_id:
-        config_data["session_id"] = session_id
-    
-    # Apply kwargs
-    config_data.update(kwargs)
-    
-    _config = ProfessorConfig(**config_data)
-    _config.log_summary()
-    
-    return _config
-
-
-def validate_config() -> bool:
-    """
-    Validate current configuration.
-    
-    Returns:
-        True if valid
-    """
-    try:
-        config = get_config()
-        logger.info("[Config] Configuration validated successfully")
-        return True
-    except ValidationError as e:
-        logger.error(f"[Config] Configuration validation failed: {e}")
-        return False
+    def __str__(self) -> str:
+        """Human-readable config summary"""
+        lines = [
+            "ProfessorConfig:",
+            f"  Mode: fast={self.fast_mode}, production={self.production_mode}",
+            f"  Sandbox: enabled={self.sandbox.enabled}",
+            f"  FeatureFactory: skip_llm={self.feature_factory.skip_llm_rounds}, skip_wilcoxon={self.feature_factory.skip_wilcoxon_gate}",
+            f"  MLOptimizer: trials={self.ml_optimizer.optuna_trials}, models={self.ml_optimizer.models_to_try}",
+            f"  Skipped agents: intel={self.agents.skip_competition_intel}, eda={self.agents.skip_eda}, critic={self.agents.skip_red_team_critic}",
+        ]
+        return "\n".join(lines)

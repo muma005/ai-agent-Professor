@@ -60,8 +60,10 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
     """Run Professor against one competition. Returns result dict."""
     import sys
     import os
+    import pickle
+    import json
     sys.path.insert(0, "/root/professor-agent")
-    
+
     # Set up environment from secrets
     os.environ.setdefault("FIREWORKS_API_KEY", "")
     os.environ.setdefault("FIREWORKS_GLM_API_KEY", "")
@@ -113,19 +115,77 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
         from core.professor import run_professor
         from core.state import ProfessorState
 
-        # Build initial state
-        state = ProfessorState(
-            session_id=f"benchmark_{entry.slug}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
-            competition_name=entry.slug,
-            train_path=split.train_path,
-            test_path=split.test_path,
-            sample_submission_path=split.sample_submission_path,
-            target_column=entry.target_column,
-            id_column=entry.id_column,
-            metric=entry.metric,
-            task_type=entry.task_type,
-            config=config,
-        )
+        session_id = f"benchmark_{entry.slug}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        output_dir = f"/data/outputs/{session_id}"
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Create schema.json (what DataEngineer would produce)
+        import polars as pl
+        train_df = pl.read_csv(split.train_path)
+        
+        schema = {
+            "columns": [],
+            "target": entry.target_column,
+            "id_columns": [entry.id_column],
+        }
+        
+        for col in train_df.columns:
+            dtype = str(train_df[col].dtype)
+            col_type = "categorical" if dtype in ["Utf8", "Categorical"] else "numerical"
+            if col == entry.target_column:
+                col_role = "target"
+            elif col == entry.id_column:
+                col_role = "id"
+            else:
+                col_role = "feature"
+            
+            schema["columns"].append({
+                "name": col,
+                "dtype": dtype,
+                "type": col_type,
+                "role": col_role,
+                "missing_ratio": float(train_df[col].null_count()) / len(train_df),
+            })
+        
+        schema_path = f"{output_dir}/schema.json"
+        with open(schema_path, "w") as f:
+            json.dump(schema, f, indent=2)
+
+        # Create preprocessor.pkl (minimal - just stores column info)
+        preprocessor = {
+            "columns": train_df.columns,
+            "target": entry.target_column,
+            "id_column": entry.id_column,
+            "dtypes": {col: str(train_df[col].dtype) for col in train_df.columns},
+        }
+        preprocessor_path = f"{output_dir}/preprocessor.pkl"
+        with open(preprocessor_path, "wb") as f:
+            pickle.dump(preprocessor, f)
+
+        # Create clean_data.csv (just use train.csv as-is for now)
+        clean_data_path = f"{output_dir}/clean_data.csv"
+        train_df.write_csv(clean_data_path)
+
+        # Build initial state with ALL required fields
+        state = {
+            "session_id": session_id,
+            "competition_name": entry.slug,
+            "raw_data_path": str(split.train_path),  # DataEngineer reads this
+            "clean_data_path": clean_data_path,
+            "schema_path": schema_path,
+            "preprocessor_path": preprocessor_path,
+            "train_path": split.train_path,
+            "test_path": split.test_path,
+            "sample_submission_path": split.sample_submission_path,
+            "target_col": entry.target_column,  # Integrity gate checks this
+            "target_column": entry.target_column,
+            "id_column": entry.id_column,
+            "id_columns": [entry.id_column],  # Must be a list!
+            "metric": entry.metric,
+            "task_type": entry.task_type,
+            "config": config,
+            "output_dir": output_dir,
+        }
 
         # Run pipeline
         result = run_professor(state, timeout_seconds=3000)

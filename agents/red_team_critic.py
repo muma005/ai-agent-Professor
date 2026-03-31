@@ -915,6 +915,17 @@ def _overall_severity(findings: list) -> str:
 @timed_node
 def run_red_team_critic(state: ProfessorState) -> ProfessorState:
     """LangGraph node -- inner retry loop."""
+    # P4.5 FIX: Check config - skip if in fast mode
+    from core.config import ProfessorConfig
+    config = state.get("config", ProfessorConfig.from_env())
+    
+    if config.agents.skip_red_team_critic:
+        print("[RedTeamCritic] Skipping (fast mode)")
+        state["critic_severity"] = "OK"
+        state["critic_verdict"] = None
+        state["critic_verdict_path"] = None
+        return state
+    
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             result = _run_core_logic(state, attempt)

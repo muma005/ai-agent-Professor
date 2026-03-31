@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime
 
 # ── Modal Image: built once, cached ──
+# Only upload simulator/ and core/ to minimize upload time
 professor_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -28,7 +29,13 @@ professor_image = (
         "kaggle>=1.6", "psutil>=5.9", "mlflow>=2.0",
         "langgraph>=0.2", "python-dotenv>=1.0",
     )
-    .add_local_dir(".", remote_path="/root/professor-agent")
+    .add_local_dir("simulator", remote_path="/root/professor-agent/simulator")
+    .add_local_dir("core", remote_path="/root/professor-agent/core")
+    .add_local_dir("agents", remote_path="/root/professor-agent/agents")
+    .add_local_dir("adapters", remote_path="/root/professor-agent/adapters")
+    .add_local_dir("guards", remote_path="/root/professor-agent/guards")
+    .add_local_dir("memory", remote_path="/root/professor-agent/memory")
+    .add_local_dir("tools", remote_path="/root/professor-agent/tools")
 )
 
 # ── Persistent Volume: competition data cached across runs ──
@@ -53,8 +60,10 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
     """Run Professor against one competition. Returns result dict."""
     import sys
     import os
+    import pickle
+    import json
     sys.path.insert(0, "/root/professor-agent")
-    
+
     # Set up environment from secrets
     os.environ.setdefault("FIREWORKS_API_KEY", "")
     os.environ.setdefault("FIREWORKS_GLM_API_KEY", "")
@@ -83,18 +92,20 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
     # Create leaderboard
     lb = SimulatedLeaderboard(entry, split)
 
-    # Configure for benchmark mode
+    # Configure for benchmark mode - FORCE fast mode defaults
     fast_config = {
         "optuna_trials": 30,
         "null_importance_shuffles": 5,
         "max_submissions": 1,
         "skip_forum_scrape": True,
+        "timeout_per_trial": 30,  # seconds
     }
     deep_config = {
         "optuna_trials": 200,
         "null_importance_shuffles": 50,
         "max_submissions": 3,
         "skip_forum_scrape": False,
+        "timeout_per_trial": 60,
     }
     config = fast_config if mode == "fast" else deep_config
 
@@ -106,19 +117,82 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
         from core.professor import run_professor
         from core.state import ProfessorState
 
-        # Build initial state
-        state = ProfessorState(
-            session_id=f"benchmark_{entry.slug}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
-            competition_name=entry.slug,
-            train_path=split.train_path,
-            test_path=split.test_path,
-            sample_submission_path=split.sample_submission_path,
-            target_column=entry.target_column,
-            id_column=entry.id_column,
-            metric=entry.metric,
-            task_type=entry.task_type,
-            config=config,
-        )
+        session_id = f"benchmark_{entry.slug}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        output_dir = f"/data/outputs/{session_id}"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # FORCE environment variables for fast execution
+        os.environ["PROFESSOR_FAST_MODE"] = "1"
+        os.environ["PROFESSOR_OPTUNA_TRIALS"] = str(config["optuna_trials"])
+        os.environ["PROFESSOR_NULL_IMPORTANCE_SHUFFLES"] = str(config["null_importance_shuffles"])
+
+        # Create schema.json (what DataEngineer would produce)
+        import polars as pl
+        train_df = pl.read_csv(split.train_path)
+        
+        schema = {
+            "columns": [],
+            "target": entry.target_column,
+            "id_columns": [entry.id_column],
+        }
+        
+        for col in train_df.columns:
+            dtype = str(train_df[col].dtype)
+            col_type = "categorical" if dtype in ["Utf8", "Categorical"] else "numerical"
+            if col == entry.target_column:
+                col_role = "target"
+            elif col == entry.id_column:
+                col_role = "id"
+            else:
+                col_role = "feature"
+            
+            schema["columns"].append({
+                "name": col,
+                "dtype": dtype,
+                "type": col_type,
+                "role": col_role,
+                "missing_ratio": float(train_df[col].null_count()) / len(train_df),
+            })
+        
+        schema_path = f"{output_dir}/schema.json"
+        with open(schema_path, "w") as f:
+            json.dump(schema, f, indent=2)
+
+        # Create preprocessor.pkl (minimal - just stores column info)
+        preprocessor = {
+            "columns": train_df.columns,
+            "target": entry.target_column,
+            "id_column": entry.id_column,
+            "dtypes": {col: str(train_df[col].dtype) for col in train_df.columns},
+        }
+        preprocessor_path = f"{output_dir}/preprocessor.pkl"
+        with open(preprocessor_path, "wb") as f:
+            pickle.dump(preprocessor, f)
+
+        # Create clean_data.csv (just use train.csv as-is for now)
+        clean_data_path = f"{output_dir}/clean_data.csv"
+        train_df.write_csv(clean_data_path)
+
+        # Build initial state with ALL required fields
+        state = {
+            "session_id": session_id,
+            "competition_name": entry.slug,
+            "raw_data_path": str(split.train_path),  # DataEngineer reads this
+            "clean_data_path": clean_data_path,
+            "schema_path": schema_path,
+            "preprocessor_path": preprocessor_path,
+            "train_path": split.train_path,
+            "test_path": split.test_path,
+            "sample_submission_path": split.sample_submission_path,
+            "target_col": entry.target_column,  # Integrity gate checks this
+            "target_column": entry.target_column,
+            "id_column": entry.id_column,
+            "id_columns": [entry.id_column],  # Must be a list!
+            "metric": entry.metric,
+            "task_type": entry.task_type,
+            "config": config,
+            "output_dir": output_dir,
+        }
 
         # Run pipeline
         result = run_professor(state, timeout_seconds=3000)
@@ -134,8 +208,11 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
 
         # Reveal scores
         final = lb.competition_end()
-
-        return {
+        
+        runtime = time.time() - start
+        
+        # Build result
+        result_dict = {
             "slug": entry.slug,
             "task_type": entry.task_type,
             "domain": entry.primary_domain,
@@ -152,19 +229,48 @@ def run_single_competition(competition_slug: str, mode: str = "fast") -> dict:
             "mode": mode,
             "error": None,
         }
+        
+        # PRINT RESULTS TO CONSOLE (so we see them before timeout)
+        print("\n" + "="*70)
+        print(f"  BENCHMARK COMPLETE: {entry.slug}")
+        print("="*70)
+        print(f"  CV Score:           {result_dict['cv_score']}")
+        print(f"  Public Score:       {result_dict['public_score']}")
+        print(f"  Private Score:      {result_dict['private_score']}")
+        print(f"  Public Percentile:  {result_dict['public_percentile']}%")
+        print(f"  Private Percentile: {result_dict['private_percentile']}%")
+        print(f"  Shakeup:            {result_dict['shakeup']:+.1f} positions")
+        print(f"  Medal:              {result_dict['medal'].upper()}")
+        print(f"  Runtime:            {result_dict['runtime_seconds']:.0f}s ({result_dict['runtime_seconds']/60:.1f} min)")
+        print("="*70 + "\n")
+        
+        # Save to volume
+        import json
+        result_path = f"{output_dir}/benchmark_result.json"
+        with open(result_path, "w") as f:
+            json.dump(result_dict, f, indent=2)
+        
+        data_volume.commit()
+        
+        return result_dict
 
     except Exception as e:
         import traceback
-        return {
+        result_dict = {
             "slug": entry.slug,
             "error": str(e),
             "traceback": traceback.format_exc(),
             "runtime_seconds": round(time.time() - start, 1),
             "mode": mode,
         }
-
-    finally:
-        data_volume.commit()
+        
+        # Print error
+        print(f"\n{'='*70}")
+        print(f"  BENCHMARK FAILED: {entry.slug}")
+        print(f"  Error: {str(e)[:200]}")
+        print(f"{'='*70}\n")
+        
+        return result_dict
 
 
 @app.function(

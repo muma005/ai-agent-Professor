@@ -1,0 +1,85 @@
+# Modal ignore file - excludes files from being uploaded to Modal
+
+# Git
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.pytest_tmp*/
+.hypothesis/
+conftest.py
+test_*.py
+*_test.py
+tests/
+
+# Notebooks
+*.ipynb
+*.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Data (will be downloaded on Modal)
+simulator/data/
+simulator/results/
+data/
+outputs/
+cache/
+notebooks/
+
+# Large model files
+*.pt
+*.pth
+*.bin
+*.onnx
+*.h5
+*.pb
+
+# Documentation
+docs/
+*.md
+!README.md
+harness.md
+Simulation_cloud.md
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Misc
+*.tmp
+*.bak
+*.bak2

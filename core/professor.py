@@ -664,25 +664,46 @@ def run_professor(
     state: ProfessorState,
     resume_from: str = None,
     timeout_seconds: int = 600,
+    config: Optional["ProfessorConfig"] = None,
 ) -> ProfessorState:
     """
     Run the full Professor graph with comprehensive error handling,
     checkpointing, and timeout.
-    
+
     Args:
         state: Initial ProfessorState
         resume_from: Path to checkpoint to resume from (optional)
         timeout_seconds: Maximum execution time (default: 10 minutes)
-    
+        config: ProfessorConfig instance. Overrides state["config"] if provided.
+
     Returns:
         Final ProfessorState
-    
+
     Raises:
         ProfessorPipelineError: If pipeline fails
     """
+    # Import here to avoid circular dependency
+    from core.config import ProfessorConfig
+    
     session_id = state.get("session_id", "unknown")
     competition_name = state.get("competition_name", "unknown")
+
+    # Load config from parameter or state
+    if config is None:
+        config = state.get("config", ProfessorConfig.from_env())
+    else:
+        state["config"] = config
     
+    # Apply config to environment (ensures all agents see it)
+    config.apply_env()
+    
+    # Save config for reproducibility
+    output_dir = f"outputs/{session_id}"
+    os.makedirs(output_dir, exist_ok=True)
+    config.save(f"{output_dir}/professor_config.json")
+    
+    logger.info(f"[Professor] Configuration: fast_mode={config.fast_mode}")
+
     # Initialize error context manager
     error_context = ErrorContextManager(session_id)
     

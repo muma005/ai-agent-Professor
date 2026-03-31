@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(modal *)",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(tasklist *)",
+      "Bash(dir *)",
+      "Bash(type *)",
+      "Bash(timeout *)",
+      "Bash(findstr *)"
+    ]
+  },
+  "$version": 3
+}

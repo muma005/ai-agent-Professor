@@ -134,17 +134,33 @@ def _synthesize_brief(notebooks: list, competition: str) -> dict:
 def run_competition_intel(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: Competition Intel (GM-CAP 1)
-    
+
     Reads:  state["competition_name"]
     Writes: intel_brief.json, competition_brief.json
             state["intel_brief_path"]
             state["competition_brief_path"]
             state["competition_brief"]
     """
+    # P4.1 FIX: Check config - skip if in fast mode
+    from core.config import ProfessorConfig
+    config = state.get("config", ProfessorConfig.from_env())
+    
+    if config.agents.skip_competition_intel:
+        print("[CompetitionIntel] Skipping (fast mode)")
+        session_id = state["session_id"]
+        output_dir = f"outputs/{session_id}"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Set empty outputs
+        state["intel_brief_path"] = None
+        state["competition_brief_path"] = None
+        state["competition_brief"] = {}
+        return state
+    
     session_id = state["session_id"]
     output_dir = f"outputs/{session_id}"
     os.makedirs(output_dir, exist_ok=True)
-    
+
     comp_name = state.get("competition_name")
     print(f"[CompetitionIntel] Starting — session: {session_id} for {comp_name}")
     

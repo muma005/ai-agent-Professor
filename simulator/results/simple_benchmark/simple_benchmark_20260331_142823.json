@@ -1,0 +1,28 @@
+{
+  "run_id": "simple_benchmark_20260331_142823",
+  "timestamp": "2026-03-31T14:28:23.977768",
+  "trials_per_competition": 1,
+  "n_competitions": 1,
+  "n_successful": 0,
+  "n_failed": 1,
+  "total_runtime_seconds": 5.6,
+  "aggregate_metrics": {
+    "median_percentile": null,
+    "mean_percentile": null,
+    "std_percentile": null,
+    "gold_rate": 0,
+    "silver_rate": 0,
+    "bronze_rate": 0,
+    "medal_rate": 0
+  },
+  "per_competition_summary": {},
+  "all_trials": [
+    {
+      "trial": 1,
+      "slug": "spaceship-titanic",
+      "error": "Classification metrics can't handle a mix of binary and continuous targets",
+      "traceback": "Traceback (most recent call last):\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\simple_benchmark.py\", line 176, in run_single_trial\n    submit_result = lb.submit(submission_path)\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\leaderboard.py\", line 130, in submit\n    public_score = self.scorer(\n        self.public_labels, public_preds,\n        self.entry.id_column, self.entry.target_column\n    )\n  File \"c:\\Users\\ADMIN\\Desktop\\Professor\\ai-agent-Professor\\simulator\\scorers.py\", line 22, in score_accuracy\n    return float(accuracy_score(y_true, y_pred))\n                 ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\utils\\_param_validation.py\", line 218, in wrapper\n    return func(*args, **kwargs)\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\metrics\\_classification.py\", line 411, in accuracy_score\n    y_type, y_true, y_pred, sample_weight = _check_targets(\n                                            ~~~~~~~~~~~~~~^\n        y_true, y_pred, sample_weight\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"C:\\Users\\ADMIN\\AppData\\Roaming\\Python\\Python314\\site-packages\\sklearn\\metrics\\_classification.py\", line 127, in _check_targets\n    raise ValueError(\n    ...<3 lines>...\n    )\nValueError: Classification metrics can't handle a mix of binary and continuous targets\n",
+      "runtime_seconds": 5.5
+    }
+  ]
+}

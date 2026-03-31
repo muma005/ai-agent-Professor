@@ -342,6 +342,22 @@ def run_eda_agent(state: ProfessorState) -> ProfessorState:
       - eda_report_path: path to eda_report.json
       - dropped_features: authoritative list of features to exclude
     """
+    # P4.2 FIX: Check config - skip if in fast mode
+    from core.config import ProfessorConfig
+    config = state.get("config", ProfessorConfig.from_env())
+    
+    if config.agents.skip_eda:
+        print("[EDAAgent] Skipping (fast mode)")
+        session_id = state["session_id"]
+        output_dir = f"outputs/{session_id}"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Set empty outputs
+        state["eda_report_path"] = None
+        state["eda_report"] = {}
+        state["dropped_features"] = []
+        return state
+    
     session_id = state["session_id"]
     output_dir = f"outputs/{session_id}"
     os.makedirs(output_dir, exist_ok=True)

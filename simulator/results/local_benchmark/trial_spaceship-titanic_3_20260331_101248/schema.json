@@ -1,0 +1,106 @@
+{
+  "columns": [
+    {
+      "name": "PassengerId",
+      "dtype": "String",
+      "type": "numerical",
+      "role": "id",
+      "missing_ratio": 0.0
+    },
+    {
+      "name": "HomePlanet",
+      "dtype": "String",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.020705521472392636
+    },
+    {
+      "name": "CryoSleep",
+      "dtype": "Boolean",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.02530674846625767
+    },
+    {
+      "name": "Cabin",
+      "dtype": "String",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.021664110429447853
+    },
+    {
+      "name": "Destination",
+      "dtype": "String",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.020130368098159507
+    },
+    {
+      "name": "Age",
+      "dtype": "Float64",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.019746932515337424
+    },
+    {
+      "name": "VIP",
+      "dtype": "Boolean",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.02396472392638037
+    },
+    {
+      "name": "RoomService",
+      "dtype": "Float64",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.019363496932515337
+    },
+    {
+      "name": "FoodCourt",
+      "dtype": "Float64",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.016679447852760737
+    },
+    {
+      "name": "ShoppingMall",
+      "dtype": "Float64",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.02473159509202454
+    },
+    {
+      "name": "Spa",
+      "dtype": "Float64",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.020897239263803682
+    },
+    {
+      "name": "VRDeck",
+      "dtype": "Float64",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.021855828220858894
+    },
+    {
+      "name": "Name",
+      "dtype": "String",
+      "type": "numerical",
+      "role": "feature",
+      "missing_ratio": 0.022430981595092023
+    },
+    {
+      "name": "Transported",
+      "dtype": "Boolean",
+      "type": "numerical",
+      "role": "target",
+      "missing_ratio": 0.0
+    }
+  ],
+  "target": "Transported",
+  "id_columns": [
+    "PassengerId"
+  ]
+}

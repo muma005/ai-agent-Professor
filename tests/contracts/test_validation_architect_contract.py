@@ -82,7 +82,9 @@ class TestValidationArchitectContract:
     def test_task_type_written_to_state(self, validated_state):
         assert "task_type" in validated_state
         assert validated_state["task_type"] in (
-            "tabular", "timeseries", "nlp", "image", "classification", "regression"
+            "tabular", "timeseries", "nlp", "image",
+            "classification", "regression",
+            "binary", "multiclass",  # data_engineer detects these directly
         )
 
     def test_no_hitl_on_clean_tabular_data(self, validated_state):
@@ -98,6 +100,7 @@ class TestValidationArchitectContract:
         from agents.data_engineer import run_data_engineer
 
         state = initial_state("test-mismatch", FIXTURE_CSV)
+        state["target_col"] = "Transported"  # Required for data_engineer
         state = run_data_engineer(state)
 
         # Patch the schema to include a datetime column
@@ -127,6 +130,7 @@ class TestValidationArchitectContract:
         from agents.data_engineer import run_data_engineer
 
         state = initial_state("test-halt", FIXTURE_CSV)
+        state["target_col"] = "Transported"  # Required for data_engineer
         state = run_data_engineer(state)
 
         schema = json.load(open(state["schema_path"]))

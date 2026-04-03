@@ -35,6 +35,7 @@ FIXTURE_CSV = "tests/fixtures/tiny_train.csv"
 def clean_state():
     """Clean pipeline state -- critic should return OK verdict."""
     s = initial_state("test-critic-clean", FIXTURE_CSV)
+    s["target_col"] = "Transported"  # Required for data_engineer schema authority
     s = run_data_engineer(s)
     s = run_eda_agent(s)
     s = run_validation_architect(s)

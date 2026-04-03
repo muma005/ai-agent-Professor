@@ -60,9 +60,13 @@ class TestDataEngineerContract:
         assert result is not None
 
     def test_rejects_nonexistent_path(self, base_state):
+        """Data engineer with nonexistent path should enter triage_mode after retries."""
         bad_state = {**base_state, "raw_data_path": "/nonexistent/train.csv"}
-        with pytest.raises(FileNotFoundError):
-            run_data_engineer(bad_state)
+        result = run_data_engineer(bad_state)
+        # After 3 retries, circuit breaker triggers triage_mode
+        assert result.get("triage_mode") is True or result.get("pipeline_halted") is True, (
+            "Data engineer with nonexistent path must enter triage/halted state."
+        )
 
     def test_produces_cleaned_parquet(self, base_state):
         result = run_data_engineer(base_state)

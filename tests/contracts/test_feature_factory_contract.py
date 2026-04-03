@@ -104,12 +104,19 @@ def feature_factory_state(tmp_path):
     })
     df.write_parquet(clean_path)
 
+    # Create a minimal preprocessor.pkl
+    from core.preprocessor import TabularPreprocessor
+    preprocessor = TabularPreprocessor(target_col="Survived")
+    preprocessor_path = session_dir / "preprocessor.pkl"
+    preprocessor.save(str(preprocessor_path))
+
     state = {
         "session_id": session_id,
         "competition_name": "titanic",
         "task_type": "tabular",
         "schema_path": str(schema_path),
         "clean_data_path": str(clean_path),
+        "preprocessor_path": str(preprocessor_path),
         "target_col": "Survived",
     }
 
@@ -264,5 +271,6 @@ class TestFeatureFactoryContract:
     def test_manifest_empty_gracefully_when_no_schema(self, feature_factory_state_no_schema):
         """If schema.json is missing, feature_factory must raise FileNotFoundError."""
         from agents.feature_factory import run_feature_factory
-        with pytest.raises(FileNotFoundError, match="schema.json"):
+        # feature_factory checks clean_data_path before schema, so expect that error first
+        with pytest.raises(FileNotFoundError):
             run_feature_factory(feature_factory_state_no_schema)

@@ -197,9 +197,13 @@ class TestEDADataAuthority:
         assert "eda_report" in result
 
     def test_contract_fails_without_schema_authority(self, eda_state):
-        """Test EDA fails if schema authority not established."""
+        """Test EDA fails if schema authority not established.
+        With retry + circuit breaker, the agent enters triage_mode instead of raising.
+        """
         # Remove target_col (should come from data_engineer)
         del eda_state["target_col"]
-        
-        with pytest.raises(ValueError):
-            run_eda_agent(eda_state)
+
+        result = run_eda_agent(eda_state)
+        assert result.get("triage_mode") is True or result.get("pipeline_halted") is True, (
+            "EDA without target_col must enter triage/halted state."
+        )

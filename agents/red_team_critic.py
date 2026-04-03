@@ -957,7 +957,13 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
     # -- Load data ---------------------------------------------------------------
     feature_data_path = state.get("feature_data_path", "")
     if not feature_data_path or not os.path.exists(feature_data_path):
-        raise ValueError(f"[{AGENT_NAME}] feature_data_path missing or not found: {feature_data_path}")
+        # Fallback to clean_data_path for pre-feature-engineering runs
+        clean_path = state.get("clean_data_path", "")
+        if clean_path and os.path.exists(clean_path):
+            logger.warning(f"[{AGENT_NAME}] feature_data_path not found, falling back to clean_data_path.")
+            feature_data_path = clean_path
+        else:
+            raise ValueError(f"[{AGENT_NAME}] feature_data_path missing or not found: {feature_data_path}")
 
     df = pl.read_parquet(feature_data_path)
 

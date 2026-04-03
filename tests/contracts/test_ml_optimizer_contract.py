@@ -130,7 +130,11 @@ class TestMLOptimizerContract:
             f"Scorer '{scorer}' is in FORBIDDEN_METRICS — never optimise toward this"
 
     def test_requires_clean_data_path(self):
+        """ML Optimizer with missing feature_data_path should enter triage_mode after retries."""
         state = initial_state("test", "tests/fixtures/tiny_train.csv")
-        state = {**state, "clean_data_path": None}
-        with pytest.raises((ValueError, TypeError)):
-            run_ml_optimizer(state)
+        state = {**state, "feature_data_path": None}
+        result = run_ml_optimizer(state)
+        # After 3 retries, circuit breaker triggers macro replan
+        assert result.get("macro_replan_requested") is True or result.get("pipeline_halted") is True, (
+            "ML Optimizer with missing feature_data_path must trigger replan/halt."
+        )

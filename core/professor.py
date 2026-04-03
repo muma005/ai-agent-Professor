@@ -49,9 +49,12 @@ from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 from agents.red_team_critic import run_red_team_critic
 from agents.feature_factory import run_feature_factory
-from agents.ensemble_architect import blend_models
+from agents.ensemble_architect import run_ensemble_architect
 from agents.pseudo_label_agent import run_pseudo_label_agent
 from agents.supervisor import run_supervisor_replan, get_replan_target, MAX_REPLAN_ATTEMPTS, NODE_PRIORITY
+from agents.submission_strategist import run_submission_strategist
+from agents.publisher import run_publisher
+from agents.qa_gate import run_qa_gate
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +123,7 @@ def route_after_ensemble(state: ProfessorState) -> str:
 def route_after_critic(state: ProfessorState) -> str:
     """After Critic: route based on severity.
     CRITICAL → supervisor_replan (or hitl if exhausted).
-    HIGH/MEDIUM/OK → submit.
+    HIGH/MEDIUM/OK → submission_strategist.
     """
     if state.get("pipeline_halted") or state.get("triage_mode"):
         print("[Professor] Pipeline halted after critic. Ending.")
@@ -134,9 +137,29 @@ def route_after_critic(state: ProfessorState) -> str:
             return END  # hitl_handler — pipeline halted
         print(f"[Professor] CRITICAL verdict. Routing to supervisor_replan (dag_version={dag_version}).")
         return "supervisor_replan"
-    # HIGH, MEDIUM, OK: continue to submit
-    print(f"[Professor] Critic verdict: {severity}. Continuing to submit.")
-    return "submit"
+    # HIGH, MEDIUM, OK: continue to submission_strategist
+    print(f"[Professor] Critic verdict: {severity}. Continuing to submission_strategist.")
+    return "submission_strategist"
+
+
+def route_after_pseudo_label(state: ProfessorState) -> str:
+    """After Pseudo Label Agent: advance via DAG."""
+    return _advance_dag(state, current="pseudo_label_agent")
+
+
+def route_after_strategist(state: ProfessorState) -> str:
+    """After Submission Strategist: advance to publisher."""
+    return _advance_dag(state, current="submission_strategist")
+
+
+def route_after_publisher(state: ProfessorState) -> str:
+    """After Publisher: advance to QA gate."""
+    return _advance_dag(state, current="publisher")
+
+
+def route_after_qa_gate(state: ProfessorState) -> str:
+    """After QA Gate: end of pipeline."""
+    return _advance_dag(state, current="qa_gate")
 
 
 def route_after_supervisor_replan(state: ProfessorState) -> str:
@@ -149,9 +172,40 @@ def route_after_supervisor_replan(state: ProfessorState) -> str:
     return target
 
 
+# ── Node-to-stage mapping for state validation ─────────────────────
+
+_NODE_TO_STAGE = {
+    "competition_intel":    "post_competition_intel",
+    "data_engineer":        "post_data_engineer",
+    "eda_agent":            "post_eda_agent",
+    "validation_architect": "post_validation_architect",
+    "feature_factory":      "post_feature_factory",
+    "ml_optimizer":         "post_ml_optimizer",
+    "ensemble_architect":   "post_ensemble_architect",
+    "submit":               "post_submit",
+}
+
+
+def _validate_node_output(state: ProfessorState, node_name: str) -> None:
+    """
+    Validate that a node produced all required state keys.
+    Logs warnings on failure — never crashes the pipeline.
+    """
+    stage = _NODE_TO_STAGE.get(node_name)
+    if not stage:
+        return  # Unknown node or no stage defined — skip validation
+
+    try:
+        from core.state_validator import validate_state
+        validate_state(state, stage=stage, node_name=node_name, strict=False)
+    except Exception as e:
+        # Never let validation break the pipeline
+        logger.warning(f"[Professor] State validation failed after '{node_name}': {e}")
+
+
 def _advance_dag(state: ProfessorState, current: str) -> str:
     """
-    Find current node in DAG and return the next one.
+    Find current node in DAG, validate its outputs, return the next one.
     If current is last node, return END.
     Checks pipeline_halted / triage_mode before advancing.
     """
@@ -166,6 +220,9 @@ def _advance_dag(state: ProfessorState, current: str) -> str:
         return END
 
     idx = dag.index(current)
+
+    # Validate state output before advancing to next node
+    _validate_node_output(state, current)
 
     if idx + 1 >= len(dag):
         print(f"[Professor] '{current}' is last node -- ending.")
@@ -389,10 +446,14 @@ def build_graph() -> StateGraph:
     graph.add_node("ml_optimizer",    run_ml_optimizer)
     graph.add_node("red_team_critic", run_red_team_critic)
     graph.add_node("feature_factory", run_feature_factory)
-    graph.add_node("ensemble_architect", blend_models)
+    graph.add_node("ensemble_architect", run_ensemble_architect)
     graph.add_node("supervisor_replan", run_supervisor_replan)
     graph.add_node("submit",          run_submit)
     graph.add_node("pseudo_label_agent", run_pseudo_label_agent)
+    # Day 23 agents
+    graph.add_node("submission_strategist", run_submission_strategist)
+    graph.add_node("publisher", run_publisher)
+    graph.add_node("qa_gate", run_qa_gate)
 
     # ── Set entry point ───────────────────────────────────────────
     graph.set_entry_point("semantic_router")
@@ -410,7 +471,11 @@ def build_graph() -> StateGraph:
         "supervisor_replan": "supervisor_replan",
         "pseudo_label_agent": "pseudo_label_agent",
         "submit":            "submit",
-        END:                 END,
+        # Day 23 agents
+        "submission_strategist": "submission_strategist",
+        "publisher":             "publisher",
+        "qa_gate":               "qa_gate",
+        END:                     END,
     }
 
     # ── Add edges ─────────────────────────────────────────────────
@@ -478,6 +543,32 @@ def build_graph() -> StateGraph:
         _all_nodes,
     )
 
+    # Fix: pseudo_label_agent had no outgoing edge (graph hang)
+    graph.add_conditional_edges(
+        "pseudo_label_agent",
+        route_after_pseudo_label,
+        _all_nodes,
+    )
+
+    # Day 23: Submission Strategist → Publisher → QA Gate → END
+    graph.add_conditional_edges(
+        "submission_strategist",
+        route_after_strategist,
+        _all_nodes,
+    )
+    graph.add_conditional_edges(
+        "publisher",
+        route_after_publisher,
+        _all_nodes,
+    )
+    graph.add_conditional_edges(
+        "qa_gate",
+        route_after_qa_gate,
+        _all_nodes,
+    )
+    graph.add_edge("qa_gate", END)
+
+    # Legacy submit node (kept as fallback)
     graph.add_edge("submit", END)
 
     return graph.compile()

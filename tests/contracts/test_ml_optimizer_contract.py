@@ -20,7 +20,9 @@ import pytest
 import os
 import json
 import pickle
+import tempfile
 import numpy as np
+import polars as pl
 from core.state import initial_state
 from core.metric_contract import FORBIDDEN_METRICS
 from agents.data_engineer import run_data_engineer
@@ -31,7 +33,7 @@ FIXTURE_CSV = "tests/fixtures/tiny_train.csv"
 
 @pytest.fixture(scope="module")
 def optimized_state():
-    """Run Data Engineer → ML Optimizer pipeline once for all tests."""
+    """Run Data Engineer → Feature Factory mock → ML Optimizer pipeline once for all tests."""
     state = initial_state(
         competition="test-titanic",
         data_path=FIXTURE_CSV,
@@ -39,6 +41,15 @@ def optimized_state():
     )
     state["target_col"] = "Transported"  # Required for data_engineer schema authority
     state = run_data_engineer(state)
+
+    # Create minimal feature_data_path (mock feature_factory output)
+    # ML Optimizer reads from feature_data_path, not clean_data_path
+    tmp_dir = tempfile.mkdtemp()
+    feature_path = os.path.join(tmp_dir, "X_train.parquet")
+    X_train = pl.read_parquet(state["clean_data_path"])
+    X_train.write_parquet(feature_path)
+    state["feature_data_path"] = feature_path
+
     state = run_ml_optimizer(state)
     return state
 

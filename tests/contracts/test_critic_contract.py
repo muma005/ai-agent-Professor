@@ -122,6 +122,7 @@ class TestCriticCatchesInjectedLeakage:
             leaked_path = f.name
 
         s = initial_state("test-critic-leak", leaked_path)
+        s["target_col"] = target_col  # Required for data_engineer schema authority
         s = run_data_engineer(s)
         s = run_eda_agent(s)
         s = run_validation_architect(s)
@@ -148,6 +149,7 @@ class TestCriticCatchesInjectedLeakage:
             p = f.name
 
         s = initial_state("test-critic-halt", p)
+        s["target_col"] = target_col  # Required for data_engineer schema authority
         s = run_data_engineer(s)
         s = run_eda_agent(s)
         s = run_validation_architect(s)
@@ -174,6 +176,7 @@ class TestCriticCatchesInjectedLeakage:
             p = f.name
 
         s = initial_state("test-critic-replan", p)
+        s["target_col"] = target_col  # Required for data_engineer schema authority
         s = run_data_engineer(s)
         s = run_eda_agent(s)
         s = run_validation_architect(s)

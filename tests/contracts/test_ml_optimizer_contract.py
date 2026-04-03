@@ -37,6 +37,7 @@ def optimized_state():
         data_path=FIXTURE_CSV,
         budget_usd=2.0
     )
+    state["target_col"] = "Transported"  # Required for data_engineer schema authority
     state = run_data_engineer(state)
     state = run_ml_optimizer(state)
     return state

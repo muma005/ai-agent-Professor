@@ -93,10 +93,24 @@ def feature_factory_state(tmp_path):
     brief_path = session_dir / "competition_brief.json"
     brief_path.write_text(json.dumps(brief, indent=2))
 
+    # Create a minimal cleaned.parquet so feature_factory can read it
+    import polars as pl
+    clean_path = session_dir / "cleaned.parquet"
+    df = pl.DataFrame({
+        "Age": [25.0, 30.0, 35.0, 40.0, 45.0],
+        "Fare": [10.0, 20.0, 30.0, 40.0, 50.0],
+        "PassengerId": [1, 2, 3, 4, 5],
+        "Survived": [0, 1, 0, 1, 0],
+    })
+    df.write_parquet(clean_path)
+
     state = {
         "session_id": session_id,
         "competition_name": "titanic",
         "task_type": "tabular",
+        "schema_path": str(schema_path),
+        "clean_data_path": str(clean_path),
+        "target_col": "Survived",
     }
 
     # Monkey-patch outputs path by changing cwd

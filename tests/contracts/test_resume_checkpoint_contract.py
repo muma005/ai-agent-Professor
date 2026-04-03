@@ -4,6 +4,11 @@ from unittest.mock import patch, MagicMock
 from core.state import initial_state
 from guards.circuit_breaker import resume_from_checkpoint
 
+
+def _serializable_state(state):
+    """Strip non-serializable objects (ProfessorConfig) from state for JSON encoding."""
+    return {k: v for k, v in state.items() if k != "config"}
+
 def test_resume_missing_session_returns_error_state():
     # redis.get returns None
     with patch("memory.redis_state.get_redis_client") as mock_get_client:
@@ -33,13 +38,13 @@ def test_resume_invalid_intervention_id_returns_error_state():
         valid_state = initial_state("comp", "data")
         valid_state["session_id"] = "valid_session"
         payload = json.dumps({
-            "state": valid_state,
+            "state": _serializable_state(valid_state),
             "agent": "data_engineer",
             "error_class": "data_quality"
         })
         mock_client.get.return_value = payload.encode('utf-8')
         mock_get_client.return_value = mock_client
-        
+
         result = resume_from_checkpoint("valid_session", 5) # 5 is invalid
         assert result.get("hitl_required") is True
         assert "intervention_id must be 1, 2, or 3" in result.get("hitl_message", "")
@@ -52,16 +57,16 @@ def test_resume_success_resets_counters():
             valid_state["session_id"] = "valid_session"
             valid_state["current_node_failure_count"] = 3
             payload = json.dumps({
-                "state": valid_state,
+                "state": _serializable_state(valid_state),
                 "agent": "data_engineer",
                 "error_class": "data_quality"
             })
             mock_client.get.return_value = payload.encode('utf-8')
             mock_get_client.return_value = mock_client
-            
+
             # Use intervention 1 (Skip validation)
             result = resume_from_checkpoint("valid_session", 1)
-            
+
             assert result.get("hitl_required") is False
             assert result.get("current_node_failure_count") == 0
             assert result.get("skip_data_validation") is True
@@ -75,16 +80,16 @@ def test_resume_manual_intervention_no_state_change():
             valid_state = initial_state("comp", "data")
             valid_state["session_id"] = "valid_session"
             payload = json.dumps({
-                "state": valid_state,
+                "state": _serializable_state(valid_state),
                 "agent": "data_engineer",
                 "error_class": "data_quality"
             })
             mock_client.get.return_value = payload.encode('utf-8')
             mock_get_client.return_value = mock_client
-            
+
             # Use intervention 3 (MANUAL)
             result = resume_from_checkpoint("valid_session", 3)
-            
+
             assert result.get("hitl_required") is False
             # Verify specific state fields weren't changed
             assert result.get("skip_data_validation") is False

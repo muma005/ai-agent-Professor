@@ -52,6 +52,10 @@ if _SKIP_SANDBOX:
 
 # ── Polars preamble injected before every generated script ─────────
 SANDBOX_PREAMBLE = """\
+import sys, site
+# Add user site-packages so subprocess can find polars, numpy, etc.
+if site.getusersitepackages() not in sys.path:
+    sys.path.insert(0, site.getusersitepackages())
 import polars as pl
 import polars.selectors as cs
 import numpy as np
@@ -93,9 +97,14 @@ _ENV_WHITELIST = {
 
 
 def _safe_env() -> dict:
-    """Build a safe env dict — only whitelisted vars, no API keys."""
+    """Build a safe env dict — only whitelisted vars, no API keys.
+    Also preserves PYTHONPATH so subprocess can find installed packages.
+    """
     env = {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
     env["PYTHONUNBUFFERED"] = "1"
+    # Preserve PYTHONPATH so subprocess can find site-packages
+    if "PYTHONPATH" in os.environ:
+        env["PYTHONPATH"] = os.environ["PYTHONPATH"]
     return env
 
 

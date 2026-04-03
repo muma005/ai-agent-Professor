@@ -201,6 +201,22 @@ PIPELINE_STAGE_REQUIREMENTS = {
     "post_ensemble_architect": {
         "required": ["ensemble_selection", "selected_models"],
     },
+    "post_pseudo_label_agent": {
+        "required": ["pseudo_labels_applied", "pseudo_label_cv_improvement"],
+    },
+    "post_submission_strategist": {
+        "required": [
+            "submission_a_path", "submission_b_path", "submission_path",
+            "submission_a_model", "submission_b_model",
+            "submission_freeze_active",
+        ],
+    },
+    "post_publisher": {
+        "required": ["report_path", "report_written"],
+    },
+    "post_qa_gate": {
+        "required": ["qa_passed", "qa_failures"],
+    },
     "post_submit": {
         "required": ["submission_path"],
     },

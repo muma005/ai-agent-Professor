@@ -10,8 +10,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from memory.chroma_client import build_chroma_client, get_or_create_collection
+from memory.chroma_client import build_chroma_client, get_or_create_collection, CHROMADB_AVAILABLE
 from core.state import ProfessorState
+
+if not CHROMADB_AVAILABLE:
+    logger.warning("[memory_schema] chromadb not installed — memory features disabled.")
 
 logger = logging.getLogger(__name__)
 
@@ -306,11 +309,15 @@ def query_critic_failure_patterns(
 ) -> list[dict]:
     """
     Queries the critic_failure_patterns ChromaDB collection.
-    Returns [] if collection doesn't exist or is empty.
+    Returns [] if chromadb not installed, collection doesn't exist, or is empty.
     Never raises.
     """
+    if not CHROMADB_AVAILABLE:
+        return []
     try:
         client = build_chroma_client()
+        if client is None:
+            return []
         ef = getattr(client, "_professor_ef", None)
         try:
             collection = client.get_collection(

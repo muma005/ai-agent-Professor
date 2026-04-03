@@ -1,7 +1,14 @@
 # memory/chroma_client.py
 
-import chromadb
-from chromadb.utils import embedding_functions
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    chromadb = None
+    embedding_functions = None
+    CHROMADB_AVAILABLE = False
+
 from typing import Optional
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
@@ -15,6 +22,8 @@ def _build_embedding_function() -> embedding_functions.SentenceTransformerEmbedd
     Never relies on ChromaDB's default embedding — that path leads to silent random embeddings.
     Raises RuntimeError with actionable instructions if the model is not available.
     """
+    if embedding_functions is None:
+        raise RuntimeError("chromadb not installed. Run: pip install chromadb")
     ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=EMBEDDING_MODEL
     )
@@ -41,11 +50,14 @@ def _build_embedding_function() -> embedding_functions.SentenceTransformerEmbedd
     return ef
 
 
-def build_chroma_client(persist_dir: str = CHROMA_PATH) -> chromadb.ClientAPI:
+def build_chroma_client(persist_dir: str = CHROMA_PATH):
     """
     Returns a PersistentClient with a validated embedding function.
     Call this once at startup. Store the result — do not call on every query.
+    Returns None if chromadb is not installed.
     """
+    if not CHROMADB_AVAILABLE:
+        return None
     ef = _build_embedding_function()
     client = chromadb.PersistentClient(path=persist_dir)
 

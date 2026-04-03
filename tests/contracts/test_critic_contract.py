@@ -17,6 +17,10 @@ import json
 import pytest
 import numpy as np
 import polars as pl
+import importlib
+
+# chromadb is optional — skip memory integration tests if not installed
+chromadb_available = importlib.util.find_spec("chromadb") is not None
 
 from core.state import initial_state
 from agents.data_engineer import run_data_engineer
@@ -295,6 +299,7 @@ class TestCriticPRCurveAudit:
         assert result["verdict"] == "OK"
 
 
+@pytest.mark.skipif(not chromadb_available, reason="chromadb not installed")
 class TestCriticMemorySchemaIntegration:
 
     def test_fingerprint_built_from_state(self):

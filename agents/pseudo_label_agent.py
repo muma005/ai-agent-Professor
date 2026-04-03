@@ -201,6 +201,12 @@ def run_pseudo_label_agent(state: ProfessorState) -> ProfessorState:
         session_id = state["session_id"]
         feature_data_path_test = f"outputs/{session_id}/X_test.parquet"
 
+    # ── Validate target_col FIRST (before loading data) ──────────
+    target_col = state.get("target_col")
+    if not target_col:
+        logger.warning("[pseudo_label] target_col not set in state. Skipping.")
+        return {**state, "pseudo_labels_applied": False, "pseudo_label_cv_improvement": 0.0}
+
     # ── Validate paths ───────────────────────────────────────────
     if not os.path.exists(feature_data_path):
         logger.warning(f"[pseudo_label] Training data not found: {feature_data_path}. Skipping.")
@@ -215,10 +221,6 @@ def run_pseudo_label_agent(state: ProfessorState) -> ProfessorState:
     X_test = read_parquet(feature_data_path_test)
 
     # ── FIX Bug #2, #8, #13: Extract target column ───────────────
-    target_col = state.get("target_col")
-    if not target_col:
-        raise ValueError("[pseudo_label] target_col not set in state")
-    
     # Validate target exists in training data
     if target_col not in X_train.columns:
         raise ValueError(f"[pseudo_label] Target '{target_col}' not in training data columns: {X_train.columns}")

@@ -44,11 +44,13 @@ def create_fixture_csv():
 
 @pytest.fixture
 def base_state():
-    return initial_state(
+    state = initial_state(
         competition="test-titanic",
         data_path=FIXTURE_CSV,
         budget_usd=2.0
     )
+    state["target_col"] = "Transported"  # Required for schema authority
+    return state
 
 
 class TestDataEngineerContract:

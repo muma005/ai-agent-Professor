@@ -80,21 +80,25 @@ class TestEDAContract:
     """Test EDA Agent contract."""
 
     def test_contract_requires_clean_data_path(self, eda_state):
-        """Test EDA cannot run without clean_data_path."""
+        """Test EDA cannot run without clean_data_path.
+        With retry + circuit breaker, the agent enters triage_mode instead of raising.
+        """
         eda_state["clean_data_path"] = ""
-        
-        # EDA has retry mechanism, will fail after 3 attempts
-        # The contract is that it raises ValueError
-        with pytest.raises(ValueError, match="clean_data_path"):
-            run_eda_agent(eda_state)
+        result = run_eda_agent(eda_state)
+        # After 3 retries, circuit breaker triggers triage_mode
+        assert result.get("triage_mode") is True or result.get("pipeline_halted") is True, (
+            "EDA with missing clean_data_path must enter triage/halted state."
+        )
 
     def test_contract_requires_target_col(self, eda_state):
-        """Test EDA cannot run without target_col."""
+        """Test EDA cannot run without target_col.
+        With retry + circuit breaker, the agent enters triage_mode instead of raising.
+        """
         eda_state["target_col"] = ""
-        
-        # EDA has retry mechanism, will fail after 3 attempts
-        with pytest.raises(ValueError, match="target_col"):
-            run_eda_agent(eda_state)
+        result = run_eda_agent(eda_state)
+        assert result.get("triage_mode") is True or result.get("pipeline_halted") is True, (
+            "EDA with missing target_col must enter triage/halted state."
+        )
 
     def test_contract_writes_eda_report(self, eda_state):
         """Test EDA always writes eda_report."""

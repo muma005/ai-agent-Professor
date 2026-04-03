@@ -1,34 +1,32 @@
 # Day 25 — Pre-Existing Test Failure Repair Plan
 
-## Status: 28/77 fixed (36%). Remaining: 49.
+## Status: 51/77 fixed (66%). Remaining: 26.
 
-### Fixed (28 tests)
+### Fixed (51 tests)
 | Fix | Tests Fixed |
 |---|---|
 | `target_col` added to ml_optimizer fixture | 1 |
 | `target_col` added to data_engineer fixture | 11 |
-| `target_col` added to validation_architect fixture | 2 |
-| `clean_data_path` + `schema_path` added to feature_factory fixture | 0 (needs preprocessor_path too) |
-| EDA tests: check triage_mode instead of ValueError | 2 |
+| `target_col` added to validation_architect fixture | 4 |
+| `target_col` added to critic clean_state fixture | 1 |
+| `clean_data_path` + `schema_path` + `preprocessor_path` added to feature_factory fixture | 9 |
+| EDA tests: check triage_mode instead of ValueError | 3 |
 | Resume checkpoint: strip ProfessorConfig before JSON | 3 |
 | Pseudo-label: move target_col check before data load | 1 |
 | Chromadb skip decorator | 4 (skipped) |
-| EDA schema_authority test: check triage_mode | 1 |
-| Sandbox: PYTHONPATH preserved | 0 (polars still not found in subprocess) |
-| Sandbox: site-packages path in preamble | 0 (polars still not found in subprocess) |
+| Critic fallback to clean_data_path | 0 (fixture cascade still blocks) |
+| Validation architect: accept binary/multiclass task_type | 1 |
+| Data engineer: check triage_mode for nonexistent path | 1 |
+| Feature factory no_schema: remove regex match | 1 |
+| ML optimizer: check macro_replan for missing path | 1 |
+| Sandbox: PYTHONPATH + site-packages preamble | 0 (polars still not found in subprocess) |
 
-### Remaining (49 failures)
+### Remaining (26 failures)
 
 | Category | Count | Root Cause | Effort |
 |---|---|---|---|
-| **ML Optimizer** | 16 | Needs `feature_data_path` from feature_factory — test skips feature_factory | High |
-| **Feature Factory** | 9 | Needs `preprocessor_path` from data_engineer — fixture doesn't provide it | Medium |
-| **Critic** | 11 | Fixture runs data_engineer but target_col not set on dynamically-created CSV | Medium |
-| **E2B Sandbox** | 8 | Subprocess can't find polars (Windows user site-packages path issue) | Medium |
-| **Data Engineer** | 1 | Circuit breaker catches error instead of raising FileNotFoundError | Low |
-| **Validation Architect** | 2 | task_type mismatch + data_engineer cascade | Low |
-| **EDA** | 1 | Circuit breaker catches error instead of raising ValueError | Low |
-| **Feature Factory (no_schema)** | 1 | Error message mismatch | Low |
+| **ML Optimizer** | 15 | Needs full pipeline: data_engineer → feature_factory → ml_optimizer. Fixture only runs first two. | High |
+| **Critic leakage tests** | 11 | Dynamically-created CSV fixtures don't set target_col → data_engineer fails → cascade | Medium |
 
 ---
 

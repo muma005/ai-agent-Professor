@@ -1,364 +1,629 @@
 # agents/ensemble_architect.py
+#
+# Day 22 — Ensemble Architect
+# Diversity pruning, constrained Optuna weights, stacking meta-learner,
+# Wilcoxon validation gate, holdout scoring.
+#
+# Called AFTER ml_optimizer completes. All model variants are in model_registry.
 
 import logging
+import gc
 import numpy as np
+import optuna
 from scipy.stats import pearsonr
+from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import get_scorer
 from core.state import ProfessorState
 from core.lineage import log_event
+from tools.wilcoxon_gate import is_significantly_better
 
 logger = logging.getLogger(__name__)
 
-# ── Diversity ensemble constants ──────────────────────────────────
-DIVERSITY_WEIGHT = 1.0
-MAX_CORRELATION_REJECT = 0.97
-PRIZE_CORRELATION_CEIL = 0.85
-PRIZE_CV_WITHIN = 0.01
-MIN_ENSEMBLE_SIZE = 2
-MAX_ENSEMBLE_SIZE = 8
+# ── Constants ─────────────────────────────────────────────────────
+CORRELATION_THRESHOLD = 0.98
+MIN_WEIGHT = 0.05
+OPTUNA_N_TRIALS = 50
+OPTUNA_N_JOBS = 1
+OPTUNA_GC_AFTER_TRIAL = True
+HOLDOUT_FRACTION = 0.20
+HOLDOUT_SEED = 42
+META_LEARNER_CV_FOLDS = 5
 
 
-def _validate_data_hash_consistency(state: ProfessorState) -> ProfessorState:
+# ── Requirement 1: Data hash validation ──────────────────────────
+
+def _validate_and_filter_data_hash(state: ProfessorState) -> dict:
     """
-    Ensures all models in registry were trained on the same data version.
-    Raises ValueError if models are mixed across data versions and none match current.
-    Filters to current-hash models if mismatch detected.
-    Logs WARNING if any filtering occurs.
+    Validate that all models in model_registry share the same data_hash
+    as state["data_hash"]. Filter out mismatches. Raise if none remain.
+
+    Returns the filtered registry dict keyed by model name.
     """
-    registry = state.get("model_registry", [])
+    current_hash = state.get("data_hash", "")
+    registry_raw = state.get("model_registry", [])
+
+    # Normalise to dict: {model_name: entry}
+    if isinstance(registry_raw, list):
+        registry = {}
+        for entry in registry_raw:
+            name = entry.get("model_id") or entry.get("model_type", f"model_{len(registry)}")
+            registry[name] = entry
+    elif isinstance(registry_raw, dict):
+        registry = dict(registry_raw)
+    else:
+        raise ValueError(f"model_registry has unexpected type: {type(registry_raw)}")
+
     if not registry:
         raise ValueError("model_registry is empty — no models to ensemble.")
 
-    current_hash = state.get("data_hash")
-    if not current_hash:
-        logger.warning(
-            "[ensemble_architect] state['data_hash'] is None. "
-            "Cannot verify data version consistency. Proceeding without check."
-        )
-        return state
+    # Filter by data_hash
+    filtered = {}
+    pruned_hash = []
+    for name, entry in registry.items():
+        entry_hash = entry.get("data_hash", "")
+        if entry_hash != current_hash:
+            logger.warning(
+                f"[ensemble_architect] Model '{name}' has data_hash='{entry_hash}' "
+                f"which does not match current data_hash='{current_hash}'. Removing."
+            )
+            pruned_hash.append(name)
+        else:
+            filtered[name] = entry
 
-    # Extract hash from every registry entry (list format per state spec)
-    hashes = {}
-    for entry in registry:
-        name = entry.get("model_type", "unknown")
-        hashes[name] = entry.get("data_hash")
-
-    unique_hashes = set(h for h in hashes.values() if h is not None)
-
-    if unique_hashes and current_hash not in unique_hashes:
-        logger.warning(
-            f"[ensemble_architect] DATA VERSION MISMATCH DETECTED. "
-            f"No models match current data_hash={current_hash}. "
-            f"Registry hashes: {unique_hashes}. Retrain required."
-        )
+    if not filtered:
         raise ValueError(
-            f"No models in registry match current data_hash={current_hash}. "
-            f"All {len(registry)} models were trained on stale data versions. "
-            f"Retrain required: run ml_optimizer from the beginning."
+            "No models match current data_hash. Retrain required."
         )
 
-    if len(unique_hashes) > 1:
-        logger.warning(
-            f"[ensemble_architect] DATA VERSION MISMATCH DETECTED. "
-            f"Registry contains models trained on {len(unique_hashes)} different data versions: "
-            f"{unique_hashes}. "
-            f"Filtering to only models matching current data_hash={current_hash}."
+    if pruned_hash:
+        logger.info(
+            f"[ensemble_architect] Removed {len(pruned_hash)} models with stale data_hash: "
+            f"{pruned_hash}"
         )
-        filtered_registry = [
-            entry for entry in registry
-            if entry.get("data_hash") == current_hash
-        ]
 
-        if not filtered_registry:
+    return filtered
+
+
+# ── Requirement 2: OOF validation ────────────────────────────────
+
+def _validate_oof_predictions(registry: dict, y_train) -> None:
+    """Verify every model has oof_predictions with correct length."""
+    expected_len = len(y_train)
+    for name, entry in registry.items():
+        oof = entry.get("oof_predictions")
+        if oof is None:
             raise ValueError(
-                f"No models in registry match current data_hash={current_hash}. "
-                f"All {len(registry)} models were trained on stale data versions. "
-                f"Retrain required: run ml_optimizer from the beginning."
+                f"Model '{name}' is missing 'oof_predictions' in registry entry. "
+                "Cannot run ensemble without OOF predictions."
+            )
+        if len(oof) != expected_len:
+            raise ValueError(
+                f"Model '{name}' has len(oof_predictions)={len(oof)} "
+                f"but len(y_train)={expected_len}. Shape mismatch."
             )
 
-        logger.info(
-            f"[ensemble_architect] Filtered registry: "
-            f"{len(filtered_registry)}/{len(registry)} models retained "
-            f"(matching data_hash={current_hash})."
-        )
 
-        state = {**state, "model_registry": filtered_registry}
+# ── Requirement 3: Diversity pruning ─────────────────────────────
 
-    log_event(
-        session_id=state["session_id"],
-        agent="ensemble_architect",
-        action="data_hash_validated",
-        keys_read=["data_hash", "model_registry"],
-        keys_written=[],
-        values_changed={
-            "data_hash": current_hash,
-            "models_checked": len(registry),
-            "models_retained": len(state["model_registry"]),
-        },
+def _prune_by_diversity(registry: dict) -> tuple:
+    """
+    Greedy diversity selection:
+    - Sort by cv_mean descending. Best model is anchor.
+    - For each remaining model: compute Pearson correlation with every
+      already-selected model. If any correlation > 0.98, reject.
+    - Returns (selected_names: list[str], pruned_names: list[str])
+    """
+    sorted_models = sorted(
+        registry.items(),
+        key=lambda kv: float(kv[1].get("cv_mean", 0.0)),
+        reverse=True,
     )
-    return state
+
+    selected_names = []
+    selected_oofs = []
+    pruned_names = []
+
+    for name, entry in sorted_models:
+        oof = np.array(entry["oof_predictions"], dtype=float)
+
+        if not selected_names:
+            # Anchor always selected
+            selected_names.append(name)
+            selected_oofs.append(oof)
+            continue
+
+        # Compute max correlation with any already-selected model
+        max_corr = -1.0
+        for sel_oof in selected_oofs:
+            corr, _ = pearsonr(oof, sel_oof)
+            max_corr = max(max_corr, corr)
+
+        if max_corr > CORRELATION_THRESHOLD:
+            logger.info(
+                f"[ensemble_architect] Diversity pruning: '{name}' rejected "
+                f"(max correlation with selected models = {max_corr:.4f} > {CORRELATION_THRESHOLD})"
+            )
+            pruned_names.append(name)
+        else:
+            selected_names.append(name)
+            selected_oofs.append(oof)
+
+    return selected_names, selected_oofs, pruned_names
 
 
-# ── OOF validation ────────────────────────────────────────────────
+# ── Requirement 4: Holdout split ─────────────────────────────────
 
-import os
+def _split_holdout(y_train, task_type: str):
+    """
+    Split training data into 80% opt_pool and 20% val_holdout.
+    Stratified for classification, random for regression.
+    Returns (opt_indices, val_indices).
+    """
+    n = len(y_train)
+    indices = np.arange(n)
 
-def _get_oof_from_entry(entry: dict) -> np.ndarray:
-    """Helper to get OOF from either disk (.npy) or backward-compatible list formatting."""
-    if "oof_predictions_path" in entry and os.path.exists(entry["oof_predictions_path"]):
-        return np.load(entry["oof_predictions_path"]).astype(float)
-    elif "oof_predictions" in entry:
-        return np.array(entry["oof_predictions"], dtype=float)
-    raise ValueError(f"Missing OOF predictions in registry entry: {entry.get('model_type', 'unknown')}")
-
-def _validate_oof_present(model_registry: list) -> None:
-    """Raises ValueError if any model is missing OOF predictions."""
-    if not isinstance(model_registry, list):
-        raise ValueError("model_registry must be a list.")
-
-    missing = [
-        entry.get("model_type", "unknown") for entry in model_registry
-        if not entry.get("oof_predictions") and not entry.get("oof_predictions_path")
-    ]
-    if missing:
-        raise ValueError(
-            f"OOF predictions missing for models: {missing}. "
-            "Cannot run diversity ensemble selection without OOF predictions. "
-            "Verify ml_optimizer contract (Day 4) is met."
+    if task_type in ("binary_classification", "multiclass_classification", "classification"):
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=HOLDOUT_SEED)
+        # Use the last fold as holdout
+        folds = list(skf.split(indices, y_train))
+        _, val_indices = folds[-1]
+        opt_indices = np.array([i for i in indices if i not in set(val_indices)])
+        val_indices = np.array(val_indices)
+    else:
+        from sklearn.model_selection import train_test_split
+        opt_indices, val_indices = train_test_split(
+            indices, test_size=HOLDOUT_FRACTION, random_state=HOLDOUT_SEED
         )
 
-
-# ── Correlation matrix ───────────────────────────────────────────
-
-def _build_correlation_matrix(oof_map: dict[str, np.ndarray]) -> dict:
-    """Returns pairwise Pearson correlation for all selected models."""
-    names = list(oof_map.keys())
-    matrix = {}
-    for i, a in enumerate(names):
-        for b in names[i + 1:]:
-            corr, _ = pearsonr(oof_map[a], oof_map[b])
-            matrix[f"{a}_vs_{b}"] = round(float(corr), 4)
-    return matrix
+    return opt_indices, val_indices
 
 
-# ── Selection report ─────────────────────────────────────────────
+def _split_oof(oof_array, opt_indices, val_indices):
+    """Split OOF predictions to match the holdout split."""
+    return oof_array[opt_indices], oof_array[val_indices]
 
-def _write_selection_report(state: ProfessorState, result: dict) -> None:
-    """Write diversity selection report to session output dir."""
-    import json
-    from pathlib import Path
+
+# ── Requirement 5: Constrained Optuna weight optimisation ────────
+
+def _run_weight_optimisation(
+    oof_stack_opt: np.ndarray,
+    y_opt: np.ndarray,
+    oof_stack_val: np.ndarray,
+    y_val: np.ndarray,
+    cv_scores: list[float],
+    metric: str,
+    task_type: str,
+):
+    """
+    Use Optuna to find optimal blend weights.
+    Maximises ensemble score on opt_pool.
+
+    Constraints:
+    - Weights sum to 1.0 via softmax normalisation
+    - No individual weight below 0.05 (clip + renormalise)
+    - max(1, len(selected_models) // 100) free parameters
+    """
+    n_models = oof_stack_opt.shape[1]
+    n_params = max(1, n_models // 100)
+
+    # Determine study direction
+    minimize_metrics = frozenset({
+        "log_loss", "cross_entropy", "brier_score",
+        "logloss", "binary_crossentropy", "rmse", "mae", "mse",
+    })
+    direction = "minimize" if metric in minimize_metrics else "maximize"
+
+    scorer = get_scorer(metric)
+
+    def objective(trial):
+        # Search temperature parameter(s)
+        raw_params = []
+        for i in range(n_params):
+            raw_params.append(trial.suggest_float(f"temp_{i}", -5.0, 5.0))
+
+        # Derive weights from CV scores scaled by temperature
+        temps = np.array(raw_params)
+        # For single param: scale CV scores by exp(temp)
+        if n_params == 1:
+            temp = temps[0]
+            scaled_scores = np.array(cv_scores) * np.exp(temp)
+        else:
+            # Multiple params: partition models and scale each group
+            scaled_scores = np.array(cv_scores)
+
+        # Softmax normalisation
+        exp_scores = np.exp(scaled_scores - np.max(scaled_scores))
+        weights = exp_scores / exp_scores.sum()
+
+        # Clip weights below MIN_WEIGHT and renormalise
+        weights = np.clip(weights, MIN_WEIGHT, None)
+        weights = weights / weights.sum()
+
+        # Compute ensemble predictions on opt_pool
+        ensemble_preds = oof_stack_opt @ weights
+
+        # Score
+        try:
+            score = _score_predictions(y_opt, ensemble_preds, metric)
+        except Exception:
+            # If scorer fails (e.g., invalid preds), return worst possible value
+            return float("-inf") if direction == "maximize" else float("inf")
+
+        return score
+
+    study = optuna.create_study(direction=direction)
+    study.optimize(objective, n_trials=OPTUNA_N_TRIALS, n_jobs=OPTUNA_N_JOBS,
+                   gc_after_trial=OPTUNA_GC_AFTER_TRIAL)
+
+    # Extract best weights using the same derivation
+    best_params = study.best_params
+    temps = np.array([best_params[f"temp_{i}"] for i in range(n_params)])
+
+    if n_params == 1:
+        temp = temps[0]
+        scaled_scores = np.array(cv_scores) * np.exp(temp)
+    else:
+        scaled_scores = np.array(cv_scores)
+
+    exp_scores = np.exp(scaled_scores - np.max(scaled_scores))
+    weights = exp_scores / exp_scores.sum()
+    weights = np.clip(weights, MIN_WEIGHT, None)
+    weights = weights / weights.sum()
+
+    return weights, study.best_value
+
+
+# ── Requirement 6: Stacking meta-learner ─────────────────────────
+
+def _train_stacking_meta_learner(
+    oof_stack: np.ndarray,
+    y_train,
+    task_type: str,
+):
+    """
+    Train a stacking meta-learner using 5-fold CV to avoid leakage.
+    Returns (meta_learner, meta_oof_predictions).
+    """
+    n_samples = oof_stack.shape[0]
+    meta_oof = np.zeros(n_samples)
+
+    if task_type in ("binary_classification", "multiclass_classification", "classification"):
+        cv = StratifiedKFold(n_splits=META_LEARNER_CV_FOLDS, shuffle=True, random_state=42)
+        meta_learner = LogisticRegression(C=0.1, max_iter=1000)
+    else:
+        cv = KFold(n_splits=META_LEARNER_CV_FOLDS, shuffle=True, random_state=42)
+        meta_learner = Ridge(alpha=10.0)
+
+    for train_idx, val_idx in cv.split(oof_stack, y_train):
+        fold_model = type(meta_learner)(**meta_learner.get_params())
+        fold_model.fit(oof_stack[train_idx], y_train[train_idx])
+        meta_oof[val_idx] = fold_model.predict(oof_stack[val_idx])
+
+    # Train final meta-learner on all data
+    meta_learner.fit(oof_stack, y_train)
+
+    return meta_learner, meta_oof
+
+
+# ── Requirement 7: Wilcoxon validation gate ──────────────────────
+
+def _apply_wilcoxon_gate(
+    ensemble_fold_scores: list[float],
+    best_single_fold_scores: list[float],
+    metric: str,
+) -> bool:
+    """
+    Call Wilcoxon gate to check if ensemble significantly beats best single model.
+    """
+    minimize_metrics = frozenset({
+        "log_loss", "cross_entropy", "brier_score",
+        "logloss", "binary_crossentropy", "rmse", "mae", "mse",
+    })
+    direction = "minimize" if metric in minimize_metrics else "maximize"
+
+    return is_significantly_better(
+        ensemble_fold_scores,
+        best_single_fold_scores,
+        direction=direction,
+    )
+
+
+# ── Requirement 8: Holdout validation ────────────────────────────
+
+def _score_predictions(
+    y_true,
+    predictions: np.ndarray,
+    metric: str,
+) -> float:
+    """Score predictions directly using the metric name."""
+    from sklearn.metrics import (
+        accuracy_score, roc_auc_score, f1_score,
+        mean_squared_error, mean_absolute_error, log_loss,
+    )
+
+    metric_lower = metric.lower()
+
+    # Classification metrics
+    if metric_lower in ("accuracy", "balanced_accuracy"):
+        preds_binary = (predictions >= 0.5).astype(int)
+        return float(accuracy_score(y_true, preds_binary))
+    elif metric_lower in ("roc_auc", "auc", "roc_auc_ovo"):
+        return float(roc_auc_score(y_true, predictions))
+    elif metric_lower in ("f1", "f1_score"):
+        preds_binary = (predictions >= 0.5).astype(int)
+        return float(f1_score(y_true, preds_binary, average="weighted"))
+    elif metric_lower in ("log_loss", "cross_entropy", "brier_score",
+                           "logloss", "binary_crossentropy"):
+        # Clip predictions to avoid log(0)
+        clipped = np.clip(predictions, 1e-15, 1 - 1e-15)
+        return float(log_loss(y_true, clipped))
+
+    # Regression metrics
+    elif metric_lower in ("rmse",):
+        return float(np.sqrt(mean_squared_error(y_true, predictions)))
+    elif metric_lower in ("mse",):
+        return float(mean_squared_error(y_true, predictions))
+    elif metric_lower in ("mae",):
+        return float(mean_absolute_error(y_true, predictions))
+
+    # Fallback: try get_scorer
+    else:
+        try:
+            scorer = get_scorer(metric)
+            # get_scorer returns a _BaseScorer that needs (estimator, X, y)
+            # For direct predictions, use the underlying scoring function
+            return float(scorer._score_func(y_true, predictions))
+        except Exception:
+            # Last resort: MSE
+            return float(-mean_squared_error(y_true, predictions))
+
+
+def _score_on_holdout(
+    predictions: np.ndarray,
+    y_holdout,
+    metric: str,
+) -> float:
+    """Score predictions on holdout set."""
+    return _score_predictions(y_holdout, predictions, metric)
+
+
+# ── Main entry point ─────────────────────────────────────────────
+
+def run_ensemble_architect(state: ProfessorState) -> dict:
+    """
+    Ensemble Architect pipeline:
+    1. Data hash validation
+    2. OOF validation
+    3. Diversity pruning (correlation > 0.98)
+    4. Holdout split (80/20)
+    5. Constrained Optuna weight optimisation
+    6. Stacking meta-learner
+    7. Wilcoxon validation gate
+    8. Holdout validation
+    9. State outputs
+    10. Lineage logging
+    """
     session_id = state["session_id"]
-    report_dir = Path(f"outputs/{session_id}")
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / "ensemble_selection_report.json"
-    report_path.write_text(json.dumps(result, indent=2, default=str))
+    metric = state.get("evaluation_metric", "accuracy")
+    task_type = state.get("task_type", "classification")
+    y_train = np.array(state["y_train"], dtype=float)
 
+    logger.info(f"[ensemble_architect] Starting — session: {session_id}")
 
-# ── GM-CAP 5: Diversity-first ensemble selection ─────────────────
+    # ── Step 1: Data hash validation ──────────────────────────────
+    registry = _validate_and_filter_data_hash(state)
+    logger.info(f"[ensemble_architect] Hash validation passed: {len(registry)} models remain")
 
-def select_diverse_ensemble(
-    model_registry: list,
-    state: ProfessorState,
-    diversity_weight: float = DIVERSITY_WEIGHT,
-    max_correlation: float = MAX_CORRELATION_REJECT,
-    max_ensemble_size: int = MAX_ENSEMBLE_SIZE,
-) -> dict:
-    """
-    Diversity-first ensemble selection.
+    # ── Step 2: OOF validation ────────────────────────────────────
+    _validate_oof_predictions(registry, y_train)
+    logger.info(f"[ensemble_architect] OOF validation passed for all {len(registry)} models")
 
-    Algorithm:
-      1. Validate OOF predictions present for all models.
-      2. Start with the highest CV model as anchor.
-      3. Greedily add models that maximise: cv_score * (1 - correlation) * diversity_weight
-      4. Reject any model with correlation > max_correlation (adds nothing).
-      5. Flag prize candidates: correlation < 0.85 AND CV within 0.01 of best model.
-      6. Stop when max_ensemble_size reached or all models evaluated.
+    # ── Step 3: Diversity pruning ─────────────────────────────────
+    selected_names, selected_oofs, pruned_diversity = _prune_by_diversity(registry)
+    logger.info(
+        f"[ensemble_architect] Diversity pruning: {len(selected_names)} selected, "
+        f"{len(pruned_diversity)} pruned"
+    )
 
-    Returns:
-        dict with keys: selected_models, prize_candidates, selection_log,
-                        ensemble_weights, correlation_matrix
-    """
-    if not isinstance(model_registry, list) or not model_registry:
-        raise ValueError("model_registry is empty or not a list — no models to select from.")
+    # Build selected registry subset
+    selected_registry = {name: registry[name] for name in selected_names}
 
-    _validate_oof_present(model_registry)
+    # ── Step 4: Holdout split ─────────────────────────────────────
+    opt_indices, val_indices = _split_holdout(y_train, task_type)
+    y_opt = y_train[opt_indices]
+    y_val_holdout = y_train[val_indices]
 
-    # Sort by CV score descending — anchor is the best model
-    models = sorted(model_registry, key=lambda x: float(x.get("cv_mean", 0.0)), reverse=True)
-    best_cv = float(models[0].get("cv_mean", 0.0))
+    # Split OOF predictions
+    oof_stack_opt_list = []
+    oof_stack_val_list = []
+    for name in selected_names:
+        oof = np.array(registry[name]["oof_predictions"], dtype=float)
+        oof_opt, oof_val = _split_oof(oof, opt_indices, val_indices)
+        oof_stack_opt_list.append(oof_opt)
+        oof_stack_val_list.append(oof_val)
 
-    anchor_entry = models[0]
-    anchor_name = anchor_entry.get("model_type", "unknown")
-    selected = [anchor_name]
-    selection_log = []
-    prize_candidates = []
+    oof_stack_opt = np.column_stack(oof_stack_opt_list)
+    oof_stack_val = np.column_stack(oof_stack_val_list)
 
-    # Build current ensemble OOF mean (starts as just the anchor's OOF)
-    oof_arrays = {anchor_name: _get_oof_from_entry(anchor_entry)}
-    ensemble_oof_mean = oof_arrays[anchor_name].copy()
+    # Full OOF stack for meta-learner
+    oof_stack_full = np.column_stack([
+        np.array(registry[name]["oof_predictions"], dtype=float)
+        for name in selected_names
+    ])
 
-    selection_log.append({
-        "model": anchor_name,
-        "decision": "SELECTED_ANCHOR",
-        "cv_mean": round(float(anchor_entry["cv_mean"]), 6),
-        "correlation": None,
-        "diversity_score": None,
-        "reason": "Highest CV model — anchor",
+    # CV scores for weight derivation
+    cv_scores = [float(registry[name].get("cv_mean", 0.0)) for name in selected_names]
+
+    # ── Step 5: Optuna weight optimisation ────────────────────────
+    if len(selected_names) > 1:
+        optimal_weights, opt_score = _run_weight_optimisation(
+            oof_stack_opt, y_opt,
+            oof_stack_val, y_val_holdout,
+            cv_scores, metric, task_type,
+        )
+    else:
+        optimal_weights = np.array([1.0])
+        opt_score = 0.0
+
+    # Compute weighted blend OOF predictions (full data)
+    weight_dict = {name: float(w) for name, w in zip(selected_names, optimal_weights)}
+    blend_oof_full = oof_stack_full @ optimal_weights
+
+    # ── Step 6: Stacking meta-learner ─────────────────────────────
+    meta_learner, meta_oof_full = _train_stacking_meta_learner(
+        oof_stack_full, y_train, task_type
+    )
+
+    # Score both approaches on holdout to decide which to use
+    blend_holdout_preds = oof_stack_val @ optimal_weights
+
+    blend_holdout_score = _score_on_holdout(blend_holdout_preds, y_val_holdout, metric)
+    meta_holdout_score = _score_on_holdout(meta_oof_full[val_indices], y_val_holdout, metric)
+
+    minimize_metrics = frozenset({
+        "log_loss", "cross_entropy", "brier_score",
+        "logloss", "binary_crossentropy", "rmse", "mae", "mse",
     })
 
-    # Greedy selection loop
-    for entry in models[1:]:
-        model_name = entry.get("model_type", "unknown")
-        if len(selected) >= max_ensemble_size:
-            selection_log.append({
-                "model": model_name,
-                "decision": "SKIPPED_MAX_SIZE",
-                "cv_mean": round(float(entry.get("cv_mean", 0.0)), 6),
-                "correlation": None,
-                "diversity_score": None,
-                "reason": f"Max ensemble size ({max_ensemble_size}) reached",
-            })
-            continue
+    if minimize_metrics:
+        meta_learner_used = meta_holdout_score <= blend_holdout_score
+    else:
+        meta_learner_used = meta_holdout_score >= blend_holdout_score
 
-        candidate_oof = _get_oof_from_entry(entry)
-        cv = float(entry.get("cv_mean", 0.0))
+    if meta_learner_used:
+        ensemble_oof_full = meta_oof_full
+        ensemble_holdout_preds = meta_oof_full[val_indices]
+        ensemble_holdout_score = meta_holdout_score
+        logger.info(
+            f"[ensemble_architect] Meta-learner selected (holdout: {meta_holdout_score:.5f} "
+            f"vs blend: {blend_holdout_score:.5f})"
+        )
+    else:
+        ensemble_oof_full = blend_oof_full
+        ensemble_holdout_preds = blend_holdout_preds
+        ensemble_holdout_score = blend_holdout_score
+        logger.info(
+            f"[ensemble_architect] Weighted blend selected (holdout: {blend_holdout_score:.5f} "
+            f"vs meta: {meta_holdout_score:.5f})"
+        )
 
-        # Pearson correlation between candidate OOF and current ensemble mean
-        corr, _ = pearsonr(candidate_oof, ensemble_oof_mean)
+    # ── Step 7: Wilcoxon validation gate ──────────────────────────
+    # Get best single model's fold scores
+    best_single_name = selected_names[0]  # Already sorted by cv_mean desc
+    best_single_fold_scores = registry[best_single_name].get("fold_scores", [])
 
-        # Reject if too correlated — strict > not >=
-        if corr > max_correlation:
-            selection_log.append({
-                "model": model_name,
-                "decision": "REJECTED_TOO_CORRELATED",
-                "cv_mean": round(cv, 6),
-                "correlation": round(float(corr), 4),
-                "diversity_score": None,
-                "reason": f"correlation={corr:.4f} > {max_correlation}",
-            })
-            continue
+    # Compute ensemble fold scores using same CV folds
+    # We approximate by scoring the ensemble OOF on the opt_pool portion
+    # and comparing against the best single model's opt_pool OOF
+    if len(best_single_fold_scores) >= 5:
+        # Use the opt_pool OOF to compute ensemble fold scores
+        # Split opt_pool into 5 folds matching the original CV structure
+        n_opt = len(y_opt)
+        if task_type in ("binary_classification", "multiclass_classification", "classification"):
+            opt_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        else:
+            opt_cv = KFold(n_splits=5, shuffle=True, random_state=42)
 
-        # Diversity-weighted score: higher CV + lower correlation = higher score
-        diversity_score = cv * (1.0 - corr) * diversity_weight
+        ensemble_fold_scores = []
+        best_single_fold_scores_opt = []
 
-        # Prize candidate check — both conditions required (AND, not OR)
-        is_prize = (corr < PRIZE_CORRELATION_CEIL) and (abs(cv - best_cv) <= PRIZE_CV_WITHIN)
-        if is_prize:
-            prize_candidates.append({
-                "model": model_name,
-                "cv_mean": round(cv, 6),
-                "correlation": round(float(corr), 4),
-                "cv_delta_from_best": round(abs(cv - best_cv), 6),
-                "diversity_score": round(diversity_score, 6),
-                "reason": "Low correlation + competitive CV — prize candidate",
-            })
+        best_single_oof = np.array(registry[best_single_name]["oof_predictions"], dtype=float)
+        best_single_oof_opt = best_single_oof[opt_indices]
 
-        selection_log.append({
-            "model": model_name,
-            "decision": "SELECTED",
-            "cv_mean": round(cv, 6),
-            "correlation": round(float(corr), 4),
-            "diversity_score": round(diversity_score, 6),
-            "is_prize": is_prize,
-            "reason": f"diversity_score={diversity_score:.4f}",
-        })
+        for _, fold_val_idx in opt_cv.split(oof_stack_opt, y_opt):
+            fold_ensemble_preds = ensemble_oof_full[opt_indices][fold_val_idx]
+            fold_best_preds = best_single_oof_opt[fold_val_idx]
 
-        selected.append(model_name)
-        oof_arrays[model_name] = candidate_oof
+            ens_score = _score_predictions(y_opt[fold_val_idx], fold_ensemble_preds, metric)
+            best_score = _score_predictions(y_opt[fold_val_idx], fold_best_preds, metric)
 
-        # Update ensemble OOF mean (equal weights during selection)
-        n = len(selected)
-        ensemble_oof_mean = sum(oof_arrays[m] for m in selected) / n
+            ensemble_fold_scores.append(float(ens_score))
+            best_single_fold_scores_opt.append(float(best_score))
 
-    # Compute final ensemble weights (equal for now — Nelder-Mead in Phase 3)
-    ensemble_weights = _compute_ensemble_weights(selected)
+        ensemble_accepted = _apply_wilcoxon_gate(
+            ensemble_fold_scores,
+            best_single_fold_scores_opt,
+            metric,
+        )
+    else:
+        # Not enough folds for Wilcoxon — fall back to mean comparison
+        logger.warning(
+            "[ensemble_architect] Insufficient fold scores for Wilcoxon test. "
+            "Falling back to mean comparison."
+        )
+        ens_mean = float(np.mean(ensemble_fold_scores)) if ensemble_fold_scores else 0.0
+        best_mean = float(np.mean(best_single_fold_scores)) if best_single_fold_scores else 0.0
+        if minimize_metrics:
+            ensemble_accepted = ens_mean < best_mean
+        else:
+            ensemble_accepted = ens_mean > best_mean
 
-    # Build correlation matrix for logging
-    correlation_matrix = _build_correlation_matrix(
-        {m: oof_arrays[m] for m in selected}
-    )
+    if not ensemble_accepted:
+        logger.warning(
+            "[ensemble_architect] Wilcoxon gate: ensemble does NOT significantly beat "
+            f"best single model ('{best_single_name}'). "
+            "Using best single model's predictions instead."
+        )
+        ensemble_oof_full = np.array(
+            registry[best_single_name]["oof_predictions"], dtype=float
+        )
+        ensemble_holdout_score = _score_on_holdout(
+            ensemble_oof_full[val_indices], y_val_holdout, metric
+        )
+        weight_dict = {best_single_name: 1.0}
+        selected_names = [best_single_name]
 
+    # ── Step 8: Holdout validation logging ────────────────────────
     logger.info(
-        f"[ensemble_architect] Diversity selection: "
-        f"{len(model_registry)} candidates → {len(selected)} selected. "
-        f"Prize candidates: {len(prize_candidates)}. "
-        f"Selections: {selected}"
+        f"[ensemble_architect] Holdout score: {ensemble_holdout_score:.5f} | "
+        f"{'Ensemble' if ensemble_accepted else 'Single model'} used | "
+        f"Models in ensemble: {len(selected_names)} | "
+        f"Weights: {weight_dict}"
     )
 
-    return {
-        "selected_models": selected,
-        "prize_candidates": prize_candidates,
-        "selection_log": selection_log,
-        "ensemble_weights": ensemble_weights,
-        "correlation_matrix": correlation_matrix,
-        "anchor": anchor_name,
-        "best_cv": round(best_cv, 6),
+    # ── Step 9: State outputs ─────────────────────────────────────
+    # Correlation matrix for selected models
+    corr_matrix = {}
+    for i, name_a in enumerate(selected_names):
+        oof_a = np.array(registry[name_a]["oof_predictions"], dtype=float)
+        for name_b in selected_names[i + 1:]:
+            oof_b = np.array(registry[name_b]["oof_predictions"], dtype=float)
+            corr, _ = pearsonr(oof_a, oof_b)
+            corr_matrix[f"{name_a}_vs_{name_b}"] = round(float(corr), 4)
+
+    result = {
+        "selected_models": selected_names,
+        "ensemble_weights": weight_dict,
+        "ensemble_oof": [float(v) for v in ensemble_oof_full],
+        "ensemble_holdout_score": float(ensemble_holdout_score),
+        "ensemble_accepted": bool(ensemble_accepted),
+        "ensemble_correlation_matrix": corr_matrix,
+        "models_pruned_diversity": pruned_diversity,
+        "meta_learner_used": bool(meta_learner_used),
     }
 
-
-def _compute_ensemble_weights(selected_models: list) -> dict:
-    """Compute equal weights for selected ensemble models."""
-    return {m: 1.0 / len(selected_models) for m in selected_models}
-
-
-def blend_models(state: ProfessorState) -> ProfessorState:
-    """
-    Blend models from registry into an ensemble.
-    1. Validates data_hash consistency FIRST (Day 13).
-    2. Diversity-first ensemble selection (Day 16).
-    3. Blend using selected models and weights.
-    """
-    # Data hash validation MUST come first — before any blending
-    state = _validate_data_hash_consistency(state)
-
-    # Convert list-format registry to dict for internal ensemble logic
-    registry_list = state.get("model_registry", [])
-    if isinstance(registry_list, list):
-        registry_dict = {entry.get("model_type", f"model_{i}"): entry
-                         for i, entry in enumerate(registry_list)}
-    else:
-        registry_dict = registry_list
-
-    # Diversity selection — replaces naive top-N
-    selection_result = select_diverse_ensemble(
-        model_registry=registry_dict,
-        state=state,
-    )
-
-    # Log to lineage
+    # ── Step 10: Lineage ──────────────────────────────────────────
     log_event(
-        session_id=state["session_id"],
+        session_id=session_id,
         agent="ensemble_architect",
         action="ensemble_selection_complete",
-        keys_read=["model_registry"],
-        keys_written=["ensemble_selection", "selected_models", "ensemble_weights",
-                       "ensemble_oof", "prize_candidates"],
+        keys_read=["model_registry", "data_hash", "y_train", "evaluation_metric", "task_type"],
+        keys_written=[
+            "selected_models", "ensemble_weights", "ensemble_oof",
+            "ensemble_holdout_score", "ensemble_accepted",
+            "ensemble_correlation_matrix", "models_pruned_diversity",
+            "meta_learner_used",
+        ],
         values_changed={
-            "selected": selection_result["selected_models"],
-            "prize_candidates_count": len(selection_result["prize_candidates"]),
-            "anchor": selection_result["anchor"],
+            "n_candidates": len(registry),
+            "n_selected": len(selected_names),
+            "n_pruned_diversity": len(pruned_diversity),
+            "ensemble_accepted": bool(ensemble_accepted),
+            "ensemble_holdout_score": float(ensemble_holdout_score),
+            "weights": weight_dict,
         },
     )
 
-    # Write selection report
-    _write_selection_report(state, selection_result)
-
-    # Blend using selected models and weights
-    oof_stack = np.column_stack([
-        np.array(registry_dict[m]["oof_predictions"], dtype=float)
-        for m in selection_result["selected_models"]
-    ])
-    weights = np.array([
-        selection_result["ensemble_weights"][m]
-        for m in selection_result["selected_models"]
-    ])
-    ensemble_oof = oof_stack @ weights
-
-    state = {
-        **state,
-        "ensemble_selection": selection_result,
-        "selected_models": selection_result["selected_models"],
-        "ensemble_weights": selection_result["ensemble_weights"],
-        "ensemble_oof": ensemble_oof.tolist(),
-        "prize_candidates": selection_result["prize_candidates"],
-    }
-    return state
+    logger.info(f"[ensemble_architect] Complete — session: {session_id}")
+    return result

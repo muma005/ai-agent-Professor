@@ -13,10 +13,10 @@ from typing import Optional
 from memory.chroma_client import build_chroma_client, get_or_create_collection, CHROMADB_AVAILABLE
 from core.state import ProfessorState
 
+logger = logging.getLogger(__name__)
+
 if not CHROMADB_AVAILABLE:
     logger.warning("[memory_schema] chromadb not installed — memory features disabled.")
-
-logger = logging.getLogger(__name__)
 
 PATTERNS_COLLECTION = "professor_patterns_v2"  # v2 — do NOT touch v1
 CRITIC_FAILURE_COLLECTION = "critic_failure_patterns"  # Day 11

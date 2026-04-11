@@ -41,21 +41,46 @@ def _check_shuffled_target(
     """
     Trains a simple model on shuffled targets.
     If AUC is meaningfully above 0.5, leakage is present.
+
+    Also checks direct feature-target correlation for Boolean/categorical features
+    that would be missed by the model-based test on small datasets.
     """
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
     from sklearn.model_selection import cross_val_score
 
     y_shuffled = y_train.sample(fraction=1.0, shuffle=True, seed=42).to_numpy()
 
-    # Select only numeric columns
+    # Select only numeric columns (including Boolean for leakage detection)
     numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
-                      pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
+                      pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, pl.Boolean)
     numeric_cols = [c for c in X_train.columns if X_train[c].dtype in numeric_dtypes]
     if not numeric_cols:
         return {"verdict": "OK", "auc_shuffled": None, "note": "No numeric features to test"}
 
     X_np = X_train.select(numeric_cols).fill_null(0).to_numpy()
 
+    # --- Deterministic leakage check: feature == target correlation ---
+    # For Boolean features, check if any feature is identical to the target.
+    # This catches direct target duplication that the shuffled test might miss on small datasets.
+    y_arr = y_train.to_numpy()
+    for col in numeric_cols:
+        feat = X_train[col].to_numpy()
+        if X_train[col].dtype == pl.Boolean:
+            # Boolean: exact match check
+            if np.array_equal(feat, y_arr):
+                return {
+                    "verdict":      "CRITICAL",
+                    "auc_shuffled": None,
+                    "threshold":    "exact_match",
+                    "evidence":     f"Feature '{col}' is identical to the target column. Direct target leakage.",
+                    "action":       f"Remove feature '{col}' immediately — it is a copy of the target.",
+                    "replan_instructions": {
+                        "remove_features": [col],
+                        "rerun_nodes": ["feature_factory", "ml_optimizer"],
+                    },
+                }
+
+    # --- Model-based shuffled target test ---
     if target_type in ("binary", "multiclass"):
         model  = RandomForestClassifier(n_estimators=30, max_depth=4, random_state=42, n_jobs=-1)
         try:
@@ -76,7 +101,9 @@ def _check_shuffled_target(
     mean_score = float(np.mean(scores))
     threshold  = 0.55 if target_type in ("binary", "multiclass") else 0.10
 
-    if target_type in ("binary", "multiclass") and mean_score > threshold:
+    logger.info(f"[{AGENT_NAME}] Shuffled target test: AUC={mean_score:.4f}, threshold={threshold}, cols={len(numeric_cols)}")
+
+    if target_type in ("binary", "multiclass") and mean_score >= threshold:
         return {
             "verdict":      "CRITICAL",
             "auc_shuffled": round(mean_score, 4),
@@ -933,6 +960,7 @@ def run_red_team_critic(state: ProfessorState) -> ProfessorState:
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(f"[{AGENT_NAME}] Attempt {attempt}/{MAX_ATTEMPTS} failed: {e}")
+            logger.error(f"[{AGENT_NAME}] Traceback: {tb}")
             if attempt == MAX_ATTEMPTS:
                 level = get_escalation_level(state)
                 return handle_escalation(state, level, AGENT_NAME, e, tb)

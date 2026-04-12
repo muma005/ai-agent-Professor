@@ -1025,6 +1025,100 @@ def _safe_eval_polars_expr(expr_str: str, allowed_modules: dict) -> Any:
     except Exception as e:
         raise ValueError(f"Failed to evaluate expression: {expr_str}. Error: {e}")
 
+
+# =========================================================================
+# Day 25: Time-series feature generation
+# =========================================================================
+
+def _generate_timeseries_features(
+    schema: dict,
+    competition_brief: dict,
+) -> list[FeatureCandidate]:
+    """
+    Time-series specific features. Called instead of Round 1 generic transforms
+    when task_type == timeseries.
+
+    Generates:
+      - Lag features (lag_1, lag_2, lag_3, lag_7, lag_14, lag_28 for daily data)
+      - Rolling statistics (rolling_mean_7, rolling_std_7, rolling_mean_28)
+      - Seasonal decomposition indicators (day_of_week, month, quarter)
+      - Trend features (days_since_start, row_index_normalised)
+
+    All features are defined by name only — applied by _apply_timeseries_transforms().
+    """
+    candidates = []
+    columns = schema.get("columns", [])
+
+    # Find numeric columns that are candidates for lag/rolling features
+    numeric_cols = [
+        c["name"] for c in columns
+        if _is_numeric(c) and not c.get("is_id") and not c.get("is_target")
+    ]
+
+    # Lag features — only for top 5 numeric columns by n_unique
+    top_numerics = sorted(
+        numeric_cols,
+        key=lambda n: next((c.get("n_unique", 0) for c in columns if c["name"] == n), 0),
+        reverse=True
+    )[:5]
+
+    for col in top_numerics:
+        for lag in [1, 2, 3, 7, 14, 28]:
+            candidates.append(FeatureCandidate(
+                name=f"{col}_lag_{lag}",
+                source_columns=[col],
+                transform_type="lag",
+                description=f"{col} lagged by {lag} periods",
+                round=1,
+            ))
+
+        for window in [7, 28]:
+            candidates.append(FeatureCandidate(
+                name=f"{col}_rolling_mean_{window}",
+                source_columns=[col],
+                transform_type="rolling_mean",
+                description=f"Rolling mean of {col} over {window} periods",
+                round=1,
+            ))
+            candidates.append(FeatureCandidate(
+                name=f"{col}_rolling_std_{window}",
+                source_columns=[col],
+                transform_type="rolling_std",
+                description=f"Rolling std of {col} over {window} periods",
+                round=1,
+            ))
+
+    # Seasonal features from date column
+    date_col = _find_date_column(schema)
+    if date_col:
+        for feat in ["day_of_week", "month", "quarter", "day_of_year", "week_of_year"]:
+            candidates.append(FeatureCandidate(
+                name=f"{feat}",
+                source_columns=[date_col],
+                transform_type=f"date_{feat}",
+                description=f"{feat} extracted from {date_col}",
+                round=1,
+            ))
+
+    logger.info(
+        f"[feature_factory] Time-series mode: {len(candidates)} candidates generated "
+        f"(lag, rolling, seasonal)."
+    )
+    return candidates
+
+
+def _find_date_column(schema: dict) -> Optional[str]:
+    """Find a date/datetime column in the schema."""
+    for c in schema.get("columns", []):
+        dtype = str(c.get("dtype", "")).lower()
+        col_name = c.get("name", "")
+        if any(kw in dtype for kw in ["date", "datetime", "time"]):
+            return col_name
+        if any(kw in col_name.lower() for kw in ["date", "time", "timestamp"]):
+            return col_name
+    return None
+
+
 @timed_node
 def run_feature_factory(state: ProfessorState) -> ProfessorState:
     """
@@ -1087,17 +1181,28 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
     # Baseline dataframe (before any new features)
     X_base = preprocessor.transform(df)
     valid_cols = set(X_base.columns)
-    
-    # Generation Phases
-    round1_candidates = _generate_round1_features(schema)
-    for c in round1_candidates:
-        src = c.source_columns[0]
-        if c.transform_type == "log":
-            c.expression = f"(pl.col('{src}').cast(pl.Float64).fill_null(0.0) + 1.0).log()"
-        elif c.transform_type == "sqrt":
-            c.expression = f"pl.col('{src}').cast(pl.Float64).fill_null(0.0).sqrt()"
-        elif c.transform_type == "missingness_flag":
-            c.expression = f"pl.col('{src}').is_null().cast(pl.Int8)"
+
+    # Day 25: Time-series routing — use lag/rolling features instead of generic Round 1
+    task_type = state.get("task_type", "binary_classification")
+
+    if task_type == "timeseries":
+        logger.info("[feature_factory] Time-series mode: using lag/rolling/seasonal features.")
+        round1_candidates = _generate_timeseries_features(schema, {})
+        # Skip Round 3 aggregations and Round 4 target encoding for time-series
+        round3_candidates = []
+        round4_candidates = []
+    else:
+        round1_candidates = _generate_round1_features(schema)
+        for c in round1_candidates:
+            src = c.source_columns[0]
+            if c.transform_type == "log":
+                c.expression = f"(pl.col('{src}').cast(pl.Float64).fill_null(0.0) + 1.0).log()"
+            elif c.transform_type == "sqrt":
+                c.expression = f"pl.col('{src}').cast(pl.Float64).fill_null(0.0).sqrt()"
+            elif c.transform_type == "missingness_flag":
+                c.expression = f"pl.col('{src}').is_null().cast(pl.Int8)"
+        round3_candidates = _generate_round3_aggregation_features(schema)
+        round4_candidates = _generate_round4_target_encoding_candidates(schema)
             
     brief_path = state.get("competition_brief_path", "")
     competition_brief = {}
@@ -1105,8 +1210,7 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         competition_brief = json.loads(Path(brief_path).read_text())
         
     round2_candidates = _generate_round2_features(schema, competition_brief, state)
-    round3_candidates = _generate_round3_aggregation_features(schema)
-    round4_candidates = _generate_round4_target_encoding_candidates(schema)
+    # round3_candidates and round4_candidates already set above (empty for timeseries)
     round5a_candidates = _generate_round5_hypothesis_features(schema, competition_brief, state)
     
     schema_names = [c["name"] for c in schema.get("columns", []) if not c.get("is_id") and not c.get("is_target")]

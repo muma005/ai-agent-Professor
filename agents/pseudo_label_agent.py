@@ -1,15 +1,16 @@
 # agents/pseudo_label_agent.py
 # -------------------------------------------------------------------------
-# Day 18: GM-CAP 6 — Pseudo-labeling with confidence gating.
-# Top 10% most confident test predictions → add to training folds ONLY.
+# Day 18/25: GM-CAP 6 — Pseudo-labeling with confidence gating.
+# Three activation gates: probability metric, data size, calibration.
+# Critic verification of confidence distribution.
 # Validation fold never sees pseudo-labels (critical invariant).
 # Max 3 iterations, Wilcoxon gate on CV improvement.
-# 
-# FIXED: 2026-03-24 — All 20 bugs fixed
+# Max pseudo-label fraction: 30% of training data.
 # -------------------------------------------------------------------------
 
 import gc
 import logging
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,25 +20,26 @@ from sklearn.model_selection import StratifiedKFold, KFold
 
 from core.state import ProfessorState
 from core.lineage import log_event
-
-# FIX Bug #5: Import is_significantly_better
 from tools.wilcoxon_gate import is_significantly_better
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────
-CONFIDENCE_TOP_FRACTION = 0.10   # top 10% most confident
-MAX_PL_ITERATIONS = 3
+PROBABILITY_METRICS     = frozenset({"log_loss", "logloss", "cross_entropy", "brier_score", "auc"})
+MIN_TEST_TO_TRAIN_RATIO = 2.0    # test set must have > 2x rows of train set
+MIN_CALIBRATION_SCORE   = 0.80   # model calibration above this threshold required
+HIGH_CONFIDENCE_THRESHOLD = 0.95  # probability threshold for pseudo-label selection
+MAX_PSEUDO_LABEL_FRACTION = 0.30  # pseudo-labels never exceed 30% of training data
+MAX_ITERATIONS          = 3
+CONFIDENCE_TOP_FRACTION = 0.10   # top 10% most confident (fallback)
 MIN_CV_IMPROVEMENT = 0.001       # must improve by at least 0.1pp
 
 
-# FIX Bug #19: Use field(default_factory=list) instead of mutable defaults
 @dataclass
 class PseudoLabelResult:
     iterations_completed: int
     pseudo_labels_added: list[int] = field(default_factory=list)
     cv_scores_with_pl: list[float] = field(default_factory=list)
-    cv_scores_without_pl: list[float] = field(default_factory=list)
     cv_improvements: list[float] = field(default_factory=list)
     halted_early: bool = False
     halt_reason: str = ""
@@ -45,60 +47,108 @@ class PseudoLabelResult:
     confidence_thresholds: list[float] = field(default_factory=list)
 
 
-# ── Confidence computation ───────────────────────────────────────
+# =========================================================================
+# Activation Gates — ALL must pass before pseudo-labeling runs
+# =========================================================================
 
-def _compute_confidence(
-    y_pred: np.ndarray,
-    metric: str,
-    quantile_model=None,
-) -> np.ndarray:
+def _count_test_rows(state: dict) -> int:
+    """Count test rows from state or test data file."""
+    n_test = state.get("n_test_rows", 0)
+    if n_test > 0:
+        return n_test
+    test_path = state.get("test_path") or state.get("clean_test_path")
+    if test_path:
+        try:
+            return len(pl.scan_csv(test_path).select(pl.count()).collect())
+        except Exception:
+            pass
+    return 0
+
+
+def _get_best_calibration_score(state: dict) -> float:
     """
-    Computes confidence score for each prediction.
-
-    Binary: confidence = |pred - 0.5| (distance from decision boundary)
-    Regression: inverse interval width, or uniform if no quantile model
-    Multiclass: margin between top-2 class probabilities
+    Get calibration score from model registry.
+    Returns 1.0 - Brier score as calibration quality metric.
     """
-    if metric in ("auc", "logloss", "binary"):
-        return np.abs(y_pred - 0.5)
-
-    elif metric in ("rmse", "mae", "regression"):
-        if quantile_model is not None:
-            q_low = quantile_model.predict(X=None, pred_quantile=0.1)
-            q_high = quantile_model.predict(X=None, pred_quantile=0.9)
-            return 1.0 / (q_high - q_low + 1e-6)
-        else:
-            logger.warning(
-                "[pseudo_label] No quantile model for regression confidence. "
-                "Using uniform confidence."
-            )
-            return np.ones(len(y_pred))
-
-    elif metric in ("multiclass", "logloss_multiclass"):
-        if y_pred.ndim == 1:
-            return np.abs(y_pred - 0.5)
-        sorted_probs = np.sort(y_pred, axis=1)[:, ::-1]
-        return sorted_probs[:, 0] - sorted_probs[:, 1]
-
-    else:
-        logger.warning(f"[pseudo_label] Unknown metric '{metric}' — using binary confidence.")
-        return np.abs(y_pred - 0.5)
+    registry = state.get("model_registry", {})
+    if isinstance(registry, dict):
+        for name, entry in registry.items():
+            if entry.get("is_calibrated"):
+                brier = entry.get("calibration_score")
+                if brier is not None:
+                    return max(0.0, 1.0 - brier)
+    elif isinstance(registry, list):
+        for entry in registry:
+            if entry.get("is_calibrated"):
+                brier = entry.get("calibration_score")
+                if brier is not None:
+                    return max(0.0, 1.0 - brier)
+    return None
 
 
-# ── Sample selection ─────────────────────────────────────────────
-
-def _select_confident_samples(
-    confidence: np.ndarray,
-    y_pred: np.ndarray,
-    top_fraction: float = CONFIDENCE_TOP_FRACTION,
-) -> tuple[np.ndarray, float]:
+def _check_activation_gates(state: dict) -> tuple[bool, str]:
     """
-    Selects top-fraction of test samples by confidence.
-    Returns (boolean mask, threshold confidence value).
+    Returns (should_run, reason).
+    ALL three gates must pass. Returns the first failing gate's reason.
     """
-    threshold = float(np.percentile(confidence, (1.0 - top_fraction) * 100))
-    mask = confidence >= threshold
-    return mask, threshold
+    metric = state.get("evaluation_metric", "")
+    if metric not in PROBABILITY_METRICS:
+        return False, f"metric '{metric}' is not probability-based"
+
+    n_train = len(state.get("y_train", []))
+    n_test = _count_test_rows(state)
+    if n_test <= n_train * MIN_TEST_TO_TRAIN_RATIO:
+        return False, (
+            f"test set ({n_test} rows) is not > {MIN_TEST_TO_TRAIN_RATIO}x "
+            f"training set ({n_train} rows)"
+        )
+
+    calibration = _get_best_calibration_score(state)
+    if calibration is None or calibration < MIN_CALIBRATION_SCORE:
+        return False, (
+            f"model calibration ({calibration}) below threshold {MIN_CALIBRATION_SCORE}"
+        )
+
+    return True, "all gates passed"
+
+
+# =========================================================================
+# Critic Verification — confidence distribution check
+# =========================================================================
+
+def _critic_verifies_confidence_distribution(
+    confidences: np.ndarray,
+    state: dict,
+) -> tuple[bool, str]:
+    """
+    Critic check: pseudo-label confidence distribution must be realistic.
+
+    Rejects if:
+    1. > 50% of predictions are above HIGH_CONFIDENCE_THRESHOLD
+    2. Mean confidence < 0.55
+    3. Std of confidences < 0.05
+    """
+    high_conf_fraction = float(np.mean(confidences >= HIGH_CONFIDENCE_THRESHOLD))
+    mean_conf = float(np.mean(confidences))
+    std_conf = float(np.std(confidences))
+
+    if high_conf_fraction > 0.50:
+        return False, (
+            f"distribution collapse: {high_conf_fraction:.1%} of predictions "
+            f"above {HIGH_CONFIDENCE_THRESHOLD}. Model is overconfident."
+        )
+    if mean_conf < 0.55:
+        return False, (
+            f"mean confidence {mean_conf:.3f} too low. "
+            "Model has insufficient discriminative power for pseudo-labeling."
+        )
+    if std_conf < 0.05:
+        return False, (
+            f"confidence std {std_conf:.4f} < 0.05. "
+            "All predictions nearly identical — constant predictor."
+        )
+
+    return True, f"distribution OK (mean={mean_conf:.3f}, std={std_conf:.4f}, high_conf={high_conf_fraction:.1%})"
 
 
 # ── CV with pseudo-labels ────────────────────────────────────────
@@ -115,30 +165,23 @@ def _run_cv_with_pseudo_labels(
 ) -> list[float]:
     """
     Runs CV where pseudo-labels are added to TRAINING FOLDS ONLY.
-
-    CRITICAL INVARIANT: Validation fold sees only real labeled samples.
-    Pseudo-labels are concatenated to the training portion of each fold
-    INSIDE the loop, AFTER train_idx/val_idx are determined.
+    Validation fold sees ONLY real labels (critical invariant).
     """
     from sklearn.metrics import roc_auc_score, mean_squared_error
 
-    is_classification = metric in ("auc", "logloss", "binary", "multiclass")
+    is_classification = metric in ("auc", "logloss", "binary", "multiclass", "log_loss", "cross_entropy", "brier_score")
     cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state) \
          if is_classification else \
          KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
 
     X_np = X_train.to_numpy()
     fold_scores = []
-
     ModelClass = lgb.LGBMClassifier if is_classification else lgb.LGBMRegressor
     X_pseudo_np = X_pseudo.to_numpy()
 
     for train_idx, val_idx in cv.split(X_np, y_train if is_classification else None):
-        # Training fold: real labels + pseudo-labels
         X_fold_train = np.vstack([X_np[train_idx], X_pseudo_np])
         y_fold_train = np.concatenate([y_train[train_idx], y_pseudo])
-
-        # Validation fold: ONLY real labels (invariant)
         X_fold_val = X_np[val_idx]
         y_fold_val = y_train[val_idx]
 
@@ -156,7 +199,6 @@ def _run_cv_with_pseudo_labels(
             score = roc_auc_score(y_fold_val, preds)
 
         fold_scores.append(float(score))
-
         del model
         gc.collect()
 
@@ -166,7 +208,7 @@ def _run_cv_with_pseudo_labels(
 # ── Memory cleanup helper ────────────────────────────────────────
 
 def _cleanup_pl_iteration(**kwargs):
-    """Delete large arrays and run GC. FIX Bug #20."""
+    """Delete large arrays and run GC."""
     for obj in kwargs.values():
         if obj is not None:
             del obj
@@ -179,212 +221,232 @@ def run_pseudo_label_agent(state: ProfessorState) -> ProfessorState:
     """
     GM-CAP 6: Pseudo-labeling with confidence gating.
 
-    1. Train on labeled data (best model params from registry)
+    Three activation gates (ALL must pass):
+    1. Probability-based metric (logloss, auc, etc.)
+    2. Test set > 2x training set size
+    3. Model calibration >= MIN_CALIBRATION_SCORE
+
+    If gates pass:
+    1. Train on labeled data
     2. Predict test set
-    3. Select top 10% most confident predictions
+    3. Select predictions >= HIGH_CONFIDENCE_THRESHOLD
     4. Add to training folds only (never validation)
-    5. CV gate + Wilcoxon: only proceed if CV improves significantly
-    6. Repeat up to MAX_PL_ITERATIONS
+    5. CV gate + Wilcoxon
+    6. Repeat up to MAX_ITERATIONS
+    7. Max pseudo-label cap: 30%
     """
-    from tools.data_tools import read_parquet, read_json
-    import os
+    session_id = state.get("session_id", "unknown")
+
+    # ── Check activation gates FIRST (before loading any data) ───
+    should_run, reason = _check_activation_gates(state)
+    if not should_run:
+        logger.info(f"[pseudo_label] Skipped: {reason}")
+        return {
+            **state,
+            "pseudo_labels_applied": False,
+            "pseudo_label_skip_reason": reason,
+            "pseudo_label_iterations": 0,
+            "pseudo_label_n_added": 0,
+            "pseudo_label_cv_improvement": 0.0,
+            "pseudo_label_confidence_mean": 0.0,
+            "pseudo_label_confidence_std": 0.0,
+            "pseudo_label_critic_accepted": False,
+            "clean_train_with_pseudo_path": "",
+        }
 
     # ── Load paths from state ────────────────────────────────────
-    feature_data_path = state.get("feature_data_path")
-    feature_data_path_test = state.get("feature_data_path_test")
+    train_path = state.get("clean_train_path") or state.get("train_path")
+    test_path = state.get("clean_test_path") or state.get("test_path")
+    if not train_path or not test_path:
+        logger.warning("[pseudo_label] No train/test path in state. Skipping.")
+        return {
+            **state,
+            "pseudo_labels_applied": False,
+            "pseudo_label_skip_reason": "no_train_test_paths",
+            "pseudo_label_iterations": 0,
+            "pseudo_label_n_added": 0,
+            "pseudo_label_cv_improvement": 0.0,
+            "pseudo_label_confidence_mean": 0.0,
+            "pseudo_label_confidence_std": 0.0,
+            "pseudo_label_critic_accepted": False,
+            "clean_train_with_pseudo_path": "",
+        }
 
-    # FIX Bug #6: Fallback paths if not set by upstream
-    if not feature_data_path:
-        session_id = state["session_id"]
-        feature_data_path = f"outputs/{session_id}/X_train.parquet"
-    if not feature_data_path_test:
-        session_id = state["session_id"]
-        feature_data_path_test = f"outputs/{session_id}/X_test.parquet"
+    if not os.path.exists(train_path) or not os.path.exists(test_path):
+        logger.warning(f"[pseudo_label] Train or test path not found. Skipping.")
+        return {
+            **state,
+            "pseudo_labels_applied": False,
+            "pseudo_label_skip_reason": "data_files_not_found",
+            "pseudo_label_iterations": 0,
+            "pseudo_label_n_added": 0,
+            "pseudo_label_cv_improvement": 0.0,
+            "pseudo_label_confidence_mean": 0.0,
+            "pseudo_label_confidence_std": 0.0,
+            "pseudo_label_critic_accepted": False,
+            "clean_train_with_pseudo_path": "",
+        }
 
-    # ── Validate target_col FIRST (before loading data) ──────────
-    target_col = state.get("target_col")
+    target_col = state.get("target_column") or state.get("target_col")
     if not target_col:
-        logger.warning("[pseudo_label] target_col not set in state. Skipping.")
-        return {**state, "pseudo_labels_applied": False, "pseudo_label_cv_improvement": 0.0}
+        logger.warning("[pseudo_label] target_column not set in state. Skipping.")
+        return {
+            **state,
+            "pseudo_labels_applied": False,
+            "pseudo_label_skip_reason": "no_target_column",
+            "pseudo_label_iterations": 0,
+            "pseudo_label_n_added": 0,
+            "pseudo_label_cv_improvement": 0.0,
+            "pseudo_label_confidence_mean": 0.0,
+            "pseudo_label_confidence_std": 0.0,
+            "pseudo_label_critic_accepted": False,
+            "clean_train_with_pseudo_path": "",
+        }
 
-    # ── Validate paths ───────────────────────────────────────────
-    if not os.path.exists(feature_data_path):
-        logger.warning(f"[pseudo_label] Training data not found: {feature_data_path}. Skipping.")
-        return {**state, "pseudo_labels_applied": False, "pseudo_label_cv_improvement": 0.0}
+    # ── Load data from disk ──────────────────────────────────────
+    X_train_df = pl.read_csv(train_path)
+    y_train = X_train_df[target_col].to_numpy()
+    X_train = X_train_df.drop(target_col)
+    X_test = pl.read_csv(test_path)
 
-    if not os.path.exists(feature_data_path_test):
-        logger.warning(f"[pseudo_label] Test data not found: {feature_data_path_test}. Skipping.")
-        return {**state, "pseudo_labels_applied": False, "pseudo_label_cv_improvement": 0.0}
-
-    # ── FIX Bug #1, #3: Load data from disk ──────────────────────
-    X_train = read_parquet(feature_data_path)
-    X_test = read_parquet(feature_data_path_test)
-
-    # ── FIX Bug #2, #8, #13: Extract target column ───────────────
-    # Validate target exists in training data
-    if target_col not in X_train.columns:
-        raise ValueError(f"[pseudo_label] Target '{target_col}' not in training data columns: {X_train.columns}")
-    
-    y_train = X_train[target_col].to_numpy()
-    X_train = X_train.drop(target_col)
-
-    # FIX Bug #14: Drop target from test if present (prevent leakage)
-    if target_col in X_test.columns:
-        logger.warning(f"[pseudo_label] Dropping target column from test data")
-        X_test = X_test.drop(target_col)
-
-    # ── FIX Bug #9, #15: Enforce feature order ───────────────────
-    feature_order = state.get("feature_order")
+    # ── Enforce feature order ────────────────────────────────────
+    feature_order = state.get("feature_order", [])
     if feature_order:
-        try:
-            X_train = X_train.select(feature_order)
-            X_test = X_test.select(feature_order)
-        except pl.exceptions.ColumnNotFoundError as e:
-            logger.error(f"[pseudo_label] Feature order mismatch: {e}")
-            raise ValueError(f"Test data columns don't match feature_order: {e}")
+        available = [c for c in feature_order if c in X_train.columns]
+        X_train = X_train.select(available)
+        X_test = X_test.select([c for c in available if c in X_test.columns])
 
-    # ── FIX Bug #4: Load metric ──────────────────────────────────
-    metric_contract_path = state.get("metric_contract_path")
-    if metric_contract_path and os.path.exists(metric_contract_path):
-        metric_contract = read_json(metric_contract_path)
-        metric = metric_contract.get("scorer_name", "auc")
-    else:
-        metric = "auc"
-        logger.warning("[pseudo_label] metric_contract not found, defaulting to 'auc'")
+    metric = state.get("evaluation_metric", "logloss")
 
-    # ── Validate selected_models ─────────────────────────────────
-    selected = state.get("selected_models", [])
-    if not selected:
-        logger.warning("[pseudo_label] No selected_models. Skipping.")
-        return {**state, "pseudo_labels_applied": False, "pseudo_label_cv_improvement": 0.0}
-
-    best_model_name = selected[0]
-
-    # FIX Bug #7, #13: Look up best model entry from registry (support both list and dict formats)
-    registry = state.get("model_registry", [])
+    # ── Get model params from registry ───────────────────────────
+    registry = state.get("model_registry", {})
     best_entry = None
-    
-    if isinstance(registry, list):
-        for entry in registry:
-            if isinstance(entry, dict):
-                model_name = entry.get("model_type") or entry.get("name") or entry.get("model_name")
-                if model_name == best_model_name:
-                    best_entry = entry
-                    break
-    elif isinstance(registry, dict):
-        best_entry = registry.get(best_model_name)
-    
+    if isinstance(registry, dict):
+        best_entry = next(iter(registry.values()), None)
+    elif isinstance(registry, list):
+        best_entry = registry[0] if registry else None
+
     if best_entry is None:
-        logger.warning(f"[pseudo_label] Model '{best_model_name}' not found in registry. Skipping.")
-        return {**state, "pseudo_labels_applied": False, "pseudo_label_cv_improvement": 0.0}
+        return {
+            **state,
+            "pseudo_labels_applied": False,
+            "pseudo_label_skip_reason": "no_model_in_registry",
+            "pseudo_label_iterations": 0,
+            "pseudo_label_n_added": 0,
+            "pseudo_label_cv_improvement": 0.0,
+            "pseudo_label_confidence_mean": 0.0,
+            "pseudo_label_confidence_std": 0.0,
+            "pseudo_label_critic_accepted": False,
+            "clean_train_with_pseudo_path": "",
+        }
 
-    # ── Extract model params ─────────────────────────────────────
     lgbm_params = best_entry.get("params", {"n_estimators": 500, "learning_rate": 0.05, "verbosity": -1})
-    if "verbosity" not in lgbm_params:
-        lgbm_params["verbosity"] = -1
-
-    # ── Get baseline CV scores ───────────────────────────────────
     baseline_cv = best_entry.get("fold_scores", [])
     if not baseline_cv:
-        logger.warning("[pseudo_label] No baseline fold_scores. Skipping.")
-        return {**state, "pseudo_labels_applied": False, "pseudo_label_cv_improvement": 0.0}
+        return {
+            **state,
+            "pseudo_labels_applied": False,
+            "pseudo_label_skip_reason": "no_baseline_cv_scores",
+            "pseudo_label_iterations": 0,
+            "pseudo_label_n_added": 0,
+            "pseudo_label_cv_improvement": 0.0,
+            "pseudo_label_confidence_mean": 0.0,
+            "pseudo_label_confidence_std": 0.0,
+            "pseudo_label_critic_accepted": False,
+            "clean_train_with_pseudo_path": "",
+        }
 
-    # ── Initialize result ────────────────────────────────────────
-    result = PseudoLabelResult(
-        iterations_completed=0,
-        pseudo_labels_added=[],
-        cv_scores_with_pl=[],
-        cv_scores_without_pl=[float(np.mean(baseline_cv))],
-        cv_improvements=[],
-        halted_early=False,
-        halt_reason="",
-        final_pseudo_label_mask=[],
-        confidence_thresholds=[],
-    )
-
-    # ── FIX Bug #1, #2, #3: Initialize working variables ─────────
-    # Use actual loaded data schema
-    X_pseudo_accumulated = X_train.slice(0, 0)  # Empty DataFrame with same schema
+    # ── Initialize working variables ─────────────────────────────
+    X_pseudo_accumulated = X_train.slice(0, 0)
     y_pseudo_accumulated = np.array([], dtype=y_train.dtype)
     current_test_mask = np.zeros(len(X_test), dtype=bool)
-    
-    # FIX Bug #11: Track previous iteration's fold scores for fair comparison
     prev_fold_scores = baseline_cv.copy()
+    all_confidences = []
+    iterations_completed = 0
+    total_pseudo_added = 0
+    cv_improvements = []
+    halt_reason = ""
 
     # ── Main iteration loop ──────────────────────────────────────
-    for iteration in range(1, MAX_PL_ITERATIONS + 1):
-        logger.info(f"[pseudo_label] Iteration {iteration}/{MAX_PL_ITERATIONS}")
-        
-        # FIX Bug #17, #18: Add try/except and validation
+    for iteration in range(1, MAX_ITERATIONS + 1):
+        logger.info(f"[pseudo_label] Iteration {iteration}/{MAX_ITERATIONS}")
+
         try:
-            # Train on labelled + accumulated pseudo-labels
+            max_pseudo = int(len(y_train) * MAX_PSEUDO_LABEL_FRACTION)
+            if len(y_pseudo_accumulated) >= max_pseudo:
+                logger.info(
+                    f"[pseudo_label] Reached max pseudo-label fraction "
+                    f"({MAX_PSEUDO_LABEL_FRACTION:.0%}). Stopping."
+                )
+                halt_reason = "max_fraction_reached"
+                break
+
+            is_cls = metric in ("auc", "logloss", "binary", "log_loss", "cross_entropy", "brier_score")
+            ModelClass = lgb.LGBMClassifier if is_cls else lgb.LGBMRegressor
+
             if len(y_pseudo_accumulated) > 0:
                 X_all = pl.concat([X_train, X_pseudo_accumulated])
                 y_all = np.concatenate([y_train, y_pseudo_accumulated])
             else:
                 X_all = X_train
                 y_all = y_train
-            
-            # Validate training data
-            if X_all.is_empty():
-                raise ValueError(f"Iteration {iteration}: Training data is empty")
-            if len(y_all) == 0:
-                raise ValueError(f"Iteration {iteration}: Training labels are empty")
-            
-            is_cls = metric in ("auc", "logloss", "binary")
-            ModelClass = lgb.LGBMClassifier if is_cls else lgb.LGBMRegressor
+
             model = ModelClass(**lgbm_params)
-            
-            try:
-                model.fit(X_all.to_numpy(), y_all)
-            except Exception as fit_error:
-                logger.error(f"[pseudo_label] Iteration {iteration}: model training failed: {fit_error}")
-                result.halt_reason = f"model_training_failed: {fit_error}"
-                result.halted_early = True
-                _cleanup_pl_iteration(X_all=X_all, y_all=y_all)
-                break
-            
-            # Predict test set — exclude already pseudo-labeled samples
+            model.fit(X_all.to_numpy(), y_all)
+
             remaining_mask = ~current_test_mask
             X_remaining = X_test.filter(pl.Series(remaining_mask))
-
             if X_remaining.is_empty():
-                result.halt_reason = "no_confident_samples"
-                result.halted_early = True
-                _cleanup_pl_iteration(X_all=X_all, y_all=y_all, model=model)
+                halt_reason = "no_confident_samples"
                 break
 
             y_pred = model.predict_proba(X_remaining.to_numpy())[:, 1] if is_cls \
                      else model.predict(X_remaining.to_numpy())
-
-            del model  # Free memory early
+            del model
             gc.collect()
 
-            # Select high-confidence samples
-            confidence = _compute_confidence(y_pred, metric)
-            conf_mask, threshold = _select_confident_samples(confidence, y_pred)
+            # Select samples above confidence threshold
+            confidence = np.abs(y_pred - 0.5) if is_cls else np.ones(len(y_pred))
+            high_conf_mask = confidence >= (HIGH_CONFIDENCE_THRESHOLD - 0.5) if is_cls else np.ones(len(y_pred), dtype=bool)
 
-            n_selected = int(conf_mask.sum())
-            if n_selected == 0:
-                result.halt_reason = "no_confident_samples"
-                result.halted_early = True
-                _cleanup_pl_iteration(X_all=X_all, y_all=y_all, y_pred=y_pred, confidence=confidence, X_remaining=X_remaining)
+            n_available = int(high_conf_mask.sum())
+            n_can_add = max_pseudo - len(y_pseudo_accumulated)
+            if n_can_add <= 0:
+                halt_reason = "max_fraction_reached"
                 break
 
-            result.confidence_thresholds.append(threshold)
+            high_conf_indices = np.where(high_conf_mask)[0]
+            if len(high_conf_indices) > n_can_add:
+                high_conf_indices = high_conf_indices[:n_can_add]
+
+            if len(high_conf_indices) == 0:
+                halt_reason = "no_confident_samples"
+                break
+
+            n_selected = len(high_conf_indices)
+            conf_mask = np.zeros(len(high_conf_mask), dtype=bool)
+            conf_mask[high_conf_indices] = True
 
             X_new_pseudo = X_remaining.filter(pl.Series(conf_mask))
             y_new_pseudo = y_pred[conf_mask]
 
-            # FIX Bug #10, #16: Convert to hard labels BEFORE using + type safety
             if is_cls:
                 y_new_pseudo = (y_new_pseudo >= 0.5).astype(y_train.dtype)
             else:
-                # Ensure dtype matches for regression
                 if y_new_pseudo.dtype != y_train.dtype:
                     y_new_pseudo = y_new_pseudo.astype(y_train.dtype)
 
-            # CV with pseudo-labels — validation fold ONLY sees real labels
+            # Critic verification
+            selected_confidences = confidence[conf_mask]
+            critic_accepted, critic_reason = _critic_verifies_confidence_distribution(selected_confidences, state)
+            if not critic_accepted:
+                logger.info(f"[pseudo_label] Iteration {iteration}: Critic rejected: {critic_reason}")
+                halt_reason = f"critic_rejected: {critic_reason}"
+                break
+
+            all_confidences.extend(selected_confidences.tolist())
+
+            # CV with pseudo-labels
             if len(y_pseudo_accumulated) > 0:
                 X_pseudo_for_cv = pl.concat([X_pseudo_accumulated, X_new_pseudo])
                 y_pseudo_for_cv = np.concatenate([y_pseudo_accumulated, y_new_pseudo])
@@ -393,44 +455,31 @@ def run_pseudo_label_agent(state: ProfessorState) -> ProfessorState:
                 y_pseudo_for_cv = y_new_pseudo
 
             cv_with = _run_cv_with_pseudo_labels(
-                X_train=X_train,
-                y_train=y_train,
-                X_pseudo=X_pseudo_for_cv,
-                y_pseudo=y_pseudo_for_cv,
-                lgbm_params=lgbm_params,
-                metric=metric,
+                X_train=X_train, y_train=y_train,
+                X_pseudo=X_pseudo_for_cv, y_pseudo=y_pseudo_for_cv,
+                lgbm_params=lgbm_params, metric=metric,
             )
 
             cv_mean_with = float(np.mean(cv_with))
-            # FIX Bug #12: Compare against previous iteration, not original model
             cv_mean_without = float(np.mean(prev_fold_scores))
             improvement = cv_mean_with - cv_mean_without
 
-            result.cv_scores_with_pl.append(cv_mean_with)
-            result.cv_improvements.append(round(improvement, 6))
-            result.pseudo_labels_added.append(n_selected)
-
             logger.info(
-                f"[pseudo_label] Iteration {iteration}: "
-                f"n_added={n_selected}, threshold={threshold:.4f}, "
+                f"[pseudo_label] Iteration {iteration}: n_added={n_selected}, "
                 f"cv_before={cv_mean_without:.5f}, cv_after={cv_mean_with:.5f}, "
                 f"improvement={improvement:+.5f}"
             )
 
-            # FIX Bug #11: Wilcoxon gate compares against PREVIOUS iteration
-            gate_passed = is_significantly_better(cv_with, prev_fold_scores)
-
-            if not gate_passed and improvement < MIN_CV_IMPROVEMENT:
-                result.halt_reason = "cv_did_not_improve"
-                result.halted_early = True
-                _cleanup_pl_iteration(X_all=X_all, y_all=y_all, y_pred=y_pred, confidence=confidence, X_remaining=X_remaining)
+            if not is_significantly_better(cv_with, prev_fold_scores):
+                logger.info(
+                    f"[pseudo_label] Iteration {iteration}: Wilcoxon gate failed. Stopping."
+                )
+                halt_reason = "wilcoxon_gate_failed"
                 break
 
-            # Accept iteration — update baseline for next comparison
+            cv_improvements.append(improvement)
             prev_fold_scores = cv_with.copy()
-            baseline_cv = cv_with  # Also update for final state
-            
-            # Accumulate pseudo-labels
+
             if len(y_pseudo_accumulated) > 0:
                 X_pseudo_accumulated = pl.concat([X_pseudo_accumulated, X_new_pseudo])
                 y_pseudo_accumulated = np.concatenate([y_pseudo_accumulated, y_new_pseudo])
@@ -439,52 +488,59 @@ def run_pseudo_label_agent(state: ProfessorState) -> ProfessorState:
                 y_pseudo_accumulated = y_new_pseudo
 
             current_test_mask[np.where(remaining_mask)[0][conf_mask]] = True
-            result.iterations_completed = iteration
-            
-            _cleanup_pl_iteration(X_all=X_all, y_all=y_all, y_pred=y_pred, confidence=confidence, X_remaining=X_remaining)
+            iterations_completed = iteration
+            total_pseudo_added += n_selected
+            gc.collect()
 
         except Exception as e:
             logger.error(f"[pseudo_label] Iteration {iteration} failed: {e}")
-            result.halt_reason = f"iteration_failed: {e}"
-            result.halted_early = True
+            halt_reason = f"iteration_failed: {e}"
             break
 
-    if result.iterations_completed == MAX_PL_ITERATIONS and not result.halted_early:
-        result.halt_reason = "max_iterations"
+    if iterations_completed == MAX_ITERATIONS and not halt_reason:
+        halt_reason = "max_iterations_reached"
 
-    result.final_pseudo_label_mask = current_test_mask.astype(int).tolist()
+    pl_applied = iterations_completed > 0
 
-    # ── Update state ─────────────────────────────────────────────
-    if len(y_pseudo_accumulated) > 0:
+    # Write augmented training CSV
+    clean_train_with_pseudo_path = ""
+    if pl_applied and len(y_pseudo_accumulated) > 0:
+        output_dir = state.get("output_dir", f"outputs/{session_id}")
+        os.makedirs(output_dir, exist_ok=True)
+        clean_train_with_pseudo_path = os.path.join(output_dir, "train_with_pseudo.csv")
         X_with_pseudo = pl.concat([X_train, X_pseudo_accumulated])
         y_with_pseudo = np.concatenate([y_train, y_pseudo_accumulated])
-    else:
-        X_with_pseudo = X_train
-        y_with_pseudo = y_train
-
-    pl_applied = result.iterations_completed > 0 and not result.halted_early
+        df_with_pseudo = X_with_pseudo.with_columns(
+            pl.Series(target_col, y_with_pseudo)
+        )
+        df_with_pseudo.write_csv(clean_train_with_pseudo_path)
 
     state = {
         **state,
-        "pseudo_label_result": result,
-        "X_train_with_pseudo": X_with_pseudo,
-        "y_train_with_pseudo": y_with_pseudo,
         "pseudo_labels_applied": pl_applied,
-        "pseudo_label_cv_improvement": sum(result.cv_improvements) if result.cv_improvements else 0.0,
+        "pseudo_label_skip_reason": "" if pl_applied else reason,
+        "pseudo_label_halt_reason": halt_reason,
+        "pseudo_label_iterations": iterations_completed,
+        "pseudo_label_n_added": total_pseudo_added,
+        "pseudo_label_cv_improvement": float(np.sum(cv_improvements)) if cv_improvements else 0.0,
+        "pseudo_label_confidence_mean": float(np.mean(all_confidences)) if all_confidences else 0.0,
+        "pseudo_label_confidence_std": float(np.std(all_confidences)) if all_confidences else 0.0,
+        "pseudo_label_critic_accepted": pl_applied and len(all_confidences) > 0,
+        "clean_train_with_pseudo_path": clean_train_with_pseudo_path,
     }
 
     log_event(
-        session_id=state["session_id"],
+        session_id=session_id,
         agent="pseudo_label_agent",
         action="pseudo_label_complete",
-        keys_read=["model_registry", "selected_models", "feature_data_path", "feature_data_path_test"],
-        keys_written=["pseudo_label_result", "X_train_with_pseudo",
-                       "y_train_with_pseudo", "pseudo_labels_applied"],
+        keys_read=["model_registry", "train_path", "test_path"],
+        keys_written=["pseudo_labels_applied", "pseudo_label_iterations",
+                       "pseudo_label_n_added", "pseudo_label_cv_improvement"],
         values_changed={
-            "iterations": result.iterations_completed,
-            "total_pl_added": sum(result.pseudo_labels_added),
+            "iterations": iterations_completed,
+            "total_pl_added": total_pseudo_added,
             "cv_improvement": state["pseudo_label_cv_improvement"],
-            "halt_reason": result.halt_reason,
+            "halt_reason": halt_reason,
         },
     )
 

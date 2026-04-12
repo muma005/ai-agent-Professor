@@ -775,22 +775,43 @@ def run_professor(
     """
     # Import here to avoid circular dependency
     from core.config import ProfessorConfig
-    
-    session_id = state.get("session_id", "unknown")
+    from core.state import generate_session_id
+    from pathlib import Path
+
+    # ── GAP 8: Session ID namespace isolation ──────────────────
+    if not state.get("session_id"):
+        state["session_id"] = generate_session_id(
+            state.get("competition_name", "unknown")
+        )
+
+    # Validate session_id format
+    if not state["session_id"].startswith("professor_"):
+        raise ValueError(
+            f"session_id '{state['session_id']}' must start with 'professor_'. "
+            "Use generate_session_id() to create session IDs."
+        )
+
+    session_id = state["session_id"]
     competition_name = state.get("competition_name", "unknown")
+
+    # Create output directory for this session
+    output_dir = Path(f"outputs/{session_id}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    state["output_dir"] = str(output_dir)
+
+    logger.info(f"[professor] Session: {session_id}")
+    logger.info(f"[professor] Output dir: {state['output_dir']}")
 
     # Load config from parameter or state
     if config is None:
         config = state.get("config", ProfessorConfig.from_env())
     else:
         state["config"] = config
-    
+
     # Apply config to environment (ensures all agents see it)
     config.apply_env()
-    
+
     # Save config for reproducibility
-    output_dir = f"outputs/{session_id}"
-    os.makedirs(output_dir, exist_ok=True)
     config.save(f"{output_dir}/professor_config.json")
     
     logger.info(f"[Professor] Configuration: fast_mode={config.fast_mode}")

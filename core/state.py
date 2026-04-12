@@ -3,7 +3,8 @@
 from typing import TypedDict, Optional, Any, Annotated, Literal
 import operator
 import uuid
-from datetime import datetime
+import hashlib
+from datetime import datetime, timezone
 
 
 # ── Custom reducers for LangGraph state channels ─────────────────
@@ -211,6 +212,53 @@ class ProfessorState(TypedDict):
     # ── Output ────────────────────────────────────────────────────
     report_path: Optional[str]
     lineage_log_path: Optional[str]
+
+
+# =========================================================================
+# GAP 8: Session ID namespace isolation
+# =========================================================================
+
+def generate_session_id(competition_name: str) -> str:
+    """
+    Generates a unique, namespaced session ID.
+    Format: professor_{competition_slug}_{timestamp}_{short_hash}
+    Example: professor_spaceship-titanic_20260301_142200_a3f9c2
+
+    The short hash includes microseconds and uuid4 to ensure uniqueness
+    even if two runs start in the same second.
+    """
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    slug = competition_name.lower().replace(" ", "-").replace("_", "-")[:30]
+    unique_seed = f"{slug}{timestamp}{now.microsecond}{uuid.uuid4().hex}"
+    short_hash = hashlib.md5(unique_seed.encode()).hexdigest()[:6]
+    return f"professor_{slug}_{timestamp}_{short_hash}"
+
+
+def build_initial_state(competition_name: str, **kwargs) -> dict:
+    """
+    Factory function for building a valid initial ProfessorState.
+    Always use this instead of building state dicts manually.
+    """
+    session_id = generate_session_id(competition_name)
+    return {
+        "competition_name": competition_name,
+        "session_id": session_id,
+        "output_dir": f"outputs/{session_id}",
+        "budget_session_id": session_id,
+        "budget_limit_usd": 10.0,
+        "budget_spent_usd": 0.0,
+        "dag_version": 1,
+        "current_node_failure_count": 0,
+        "hitl_required": False,
+        "replan_requested": False,
+        "critic_severity": "unchecked",
+        "model_registry": {},
+        "features_dropped": [],
+        "feature_order": [],
+        "external_data_allowed": False,
+        **kwargs,
+    }
 
 
 def initial_state(

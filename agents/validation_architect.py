@@ -25,6 +25,52 @@ _DATETIME_DTYPES = {
 }
 
 
+def validate_cv_strategy(state: dict, cv_strategy: dict) -> None:
+    """
+    Raises ValueError if a random-shuffle CV is used with timeseries data.
+    Called before any CV training begins.
+    """
+    if state.get("task_type") != "timeseries":
+        return  # only enforced for time-series
+
+    if cv_strategy.get("shuffle") is True:
+        raise ValueError(
+            "VALIDATION ERROR: shuffle=True is not allowed for task_type=timeseries. "
+            "Temporal leakage detected. Use TimeSeriesSplit instead."
+        )
+    if cv_strategy.get("cv_strategy") in ("StratifiedKFold", "KFold"):
+        raise ValueError(
+            f"VALIDATION ERROR: {cv_strategy['cv_strategy']} is not allowed for timeseries. "
+            "Use TimeSeriesSplit. Random fold splitting destroys temporal ordering."
+        )
+
+
+def _select_cv_strategy(state: dict) -> dict:
+    """
+    Selects CV strategy based on task_type and schema.
+    For task_type=timeseries, enforces TimeSeriesSplit with shuffle=False.
+    """
+    task_type = state.get("task_type", "binary_classification")
+
+    if task_type == "timeseries":
+        # TimeSeriesSplit only — no random shuffle ever
+        n_splits = state.get("cv_n_splits", 5)
+        return {
+            "cv_strategy":   "TimeSeriesSplit",
+            "cv_class":      "sklearn.model_selection.TimeSeriesSplit",
+            "cv_params":     {"n_splits": n_splits},
+            "shuffle":       False,   # hard False — never shuffle time-series
+            "stratify":      False,   # not applicable for time-series
+            "rationale": (
+                f"task_type=timeseries requires TimeSeriesSplit (n_splits={n_splits}). "
+                "Random shuffle is prohibited — it causes temporal leakage."
+            ),
+        }
+
+    # ... existing strategy selection for other task types ...
+    return {}
+
+
 def _detect_group_column(schema: dict) -> Optional[str]:
     """Return the name of a group/ID column if one exists in schema."""
     group_keywords = ["group", "patient", "user_id", "customer_id",
@@ -161,7 +207,11 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
     datetime_col = _detect_datetime_column(schema)
     target_type  = _detect_target_type(schema, target_col)
 
-    if group_col:
+    # Day 25: Enforce TimeSeriesSplit for timeseries task_type
+    if state.get("task_type") == "timeseries":
+        cv_type  = "TimeSeriesSplit"
+        n_splits = state.get("cv_n_splits", 5)
+    elif group_col:
         cv_type  = "GroupKFold"
         n_splits = 5
     elif datetime_col:

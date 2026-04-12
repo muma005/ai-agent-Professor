@@ -6,6 +6,7 @@
 
 import uuid
 import json
+import time
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -355,4 +356,147 @@ def query_critic_failure_patterns(
     except Exception as e:
         logger.warning(f"[query_critic_failure_patterns] Failed: {e}")
         return []
+
+
+# =========================================================================
+# HPO Warm Start — GAP 11
+# =========================================================================
+
+HPO_MEMORIES_COLLECTION = "professor_hpo_memories"
+
+
+def get_hpo_warm_start_seeds(
+    state: dict,
+    n_seeds: int = 5,
+    max_distance: float = 0.70,
+    min_confidence: float = 0.65,
+) -> list[dict]:
+    """
+    Queries ChromaDB for hyperparameter configurations from similar past competitions.
+    Returns a list of param dicts ready to inject into Optuna as seed trials.
+
+    Returns [] when:
+      - ChromaDB collection does not exist (first competition)
+      - Collection is empty
+      - No results within max_distance
+      - Any ChromaDB error
+
+    Never raises. Conservative: returns [] on any failure.
+    """
+    try:
+        if not CHROMADB_AVAILABLE:
+            return []
+        client = build_chroma_client()
+        if client is None:
+            return []
+        try:
+            collection = client.get_collection(HPO_MEMORIES_COLLECTION)
+        except Exception:
+            return []  # collection does not exist — first competition
+
+        if collection.count() == 0:
+            return []
+
+        fingerprint = state.get("competition_fingerprint", {})
+        query_text = fingerprint_to_text(fingerprint)
+
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=min(n_seeds, collection.count()),
+            include=["documents", "metadatas", "distances"],
+        )
+
+        seeds = []
+        for meta, dist in zip(
+            results["metadatas"][0],
+            results["distances"][0],
+        ):
+            if dist > max_distance:
+                continue
+            confidence = float(meta.get("confidence", 0.0))
+            if confidence < min_confidence:
+                continue
+
+            params_json = meta.get("params_json")
+            if not params_json:
+                continue
+            try:
+                params = json.loads(params_json)
+                params["_seed_source"] = meta.get("competition_name", "unknown")
+                params["_seed_confidence"] = round(confidence, 3)
+                params["_seed_distance"] = round(float(dist), 3)
+                seeds.append(params)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        return seeds
+
+    except Exception as e:
+        logger.warning(f"[get_hpo_warm_start_seeds] Failed: {e}. Returning empty seeds.")
+        return []
+
+
+def _compute_confidence_from_cv(cv_mean: float, cv_std: float) -> float:
+    """
+    Confidence based on CV stability:
+      high stability (std < 0.005) → confidence up to 0.90
+      high variance (std > 0.030)  → confidence as low as 0.50
+    """
+    if cv_std <= 0:
+        return 0.70
+    stability = max(0.0, 1.0 - (cv_std / 0.030))
+    return round(min(0.90, 0.50 + 0.40 * stability), 3)
+
+
+def store_hpo_memory(
+    state: dict,
+    best_params: dict,
+    cv_mean: float,
+    cv_std: float,
+) -> bool:
+    """
+    Stores the winning hyperparameter configuration in ChromaDB.
+    Returns True on success, False on failure.
+
+    The document text is the competition fingerprint description.
+    The metadata contains the serialised params and performance stats.
+    Never raises.
+    """
+    try:
+        if not CHROMADB_AVAILABLE:
+            return False
+        client = build_chroma_client()
+        if client is None:
+            return False
+        collection = get_or_create_collection(client, HPO_MEMORIES_COLLECTION)
+
+        fingerprint = state.get("competition_fingerprint", {})
+        query_text = fingerprint_to_text(fingerprint)
+        competition = state.get("competition_name", "unknown")
+        session_id = state.get("session_id", "unknown")
+
+        clean_params = {
+            k: v for k, v in best_params.items()
+            if not k.startswith("_seed_")
+        }
+
+        collection.add(
+            documents=[query_text],
+            metadatas=[{
+                "competition_name": competition,
+                "session_id": session_id,
+                "cv_mean": round(float(cv_mean), 6),
+                "cv_std": round(float(cv_std), 6),
+                "model_type": clean_params.get("model_type", "unknown"),
+                "confidence": _compute_confidence_from_cv(cv_mean, cv_std),
+                "params_json": json.dumps(clean_params),
+                "stored_at": datetime.now(timezone.utc).isoformat(),
+                **{k: str(v) for k, v in fingerprint.items()},
+            }],
+            ids=[f"hpo_{session_id}_{int(time.time())}"],
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"[store_hpo_memory] Failed: {e}")
+        return False
 

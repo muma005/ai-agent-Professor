@@ -27,6 +27,7 @@ from core.metric_contract import (
 from tools.data_tools import read_parquet, read_json
 from guards.agent_retry import with_agent_retry
 from tools.performance_monitor import timed_node
+from memory.memory_schema import get_hpo_warm_start_seeds
 
 logger = logging.getLogger(__name__)
 
@@ -1206,6 +1207,60 @@ def run_optimization(
     return study
 
 
+# ── HPO Warm Start injection ─────────────────────────────────────
+
+HPO_OVERRIDES = {
+    "lgbm": {"n_estimators": 150, "verbose": -1},
+    "xgb": {"n_estimators": 150, "verbosity": 0},
+    "catboost": {"iterations": 150, "verbose": 0},
+}
+
+
+def _inject_warm_start_seeds(
+    study: optuna.Study,
+    seeds: list[dict],
+    X_np: np.ndarray,
+    y: np.ndarray,
+    cv_folds: list,
+    task_type: str,
+    contract,
+    max_memory_gb: float,
+) -> None:
+    """
+    Runs each seed config as a real trial (not a phantom trial).
+    Real trials give Optuna honest performance data to guide the TPE sampler.
+    Seeds that fail (OOM, crash) are skipped — never block main study.
+    """
+    for seed_params in seeds:
+        try:
+            clean = {k: v for k, v in seed_params.items() if not k.startswith("_")}
+            model_type = clean.get("model_type", "lgbm")
+            hpo_params = {**clean, **HPO_OVERRIDES.get(model_type, {})}
+
+            fold_scores = _run_cv_no_collect(X_np, y, hpo_params, cv_folds, task_type, contract)
+            mean_cv = float(np.mean(fold_scores))
+
+            # Determine direction for telling
+            direction = study.direction
+            # For Optuna >= 4.0, direction is an enum; handle both old and new API
+            if hasattr(direction, 'name'):
+                maximize = direction.name == 'MAXIMIZE'
+            else:
+                maximize = direction[0].name == 'MAXIMIZE' if hasattr(direction, '__getitem__') else True
+
+            value = mean_cv if maximize else -mean_cv
+
+            trial = study.ask()
+            study.tell(trial, value)
+
+            logger.debug(f"[ml_optimizer] Seed trial complete: cv={mean_cv:.5f} "
+                        f"(source: {seed_params.get('_seed_source')})")
+
+        except Exception as e:
+            logger.warning(f"[ml_optimizer] Seed trial failed: {e}. Skipping.")
+            continue
+
+
 @timed_node
 @with_agent_retry("MLOptimizer")
 def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
@@ -1325,12 +1380,30 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     n_trials_dynamic = max(3, int(len(y) * 0.03))
     n_trials = max(n_trials, n_trials_dynamic)  # Use config value as minimum
 
+    # ── HPO Warm Start (GAP 11) ──────────────────────────────────
+    hpo_seeds = get_hpo_warm_start_seeds(state)
+    if hpo_seeds:
+        logger.info(
+            f"[ml_optimizer] Warm start: {len(hpo_seeds)} HPO seeds from ChromaDB. "
+            f"Sources: {[s.get('_seed_source') for s in hpo_seeds]}"
+        )
+    else:
+        logger.info("[ml_optimizer] No HPO seeds found (first competition or no similar history). "
+                    "Starting Optuna from scratch.")
+
+    state["hpo_warm_start_seeds_used"] = len(hpo_seeds)
+
     print(f"[MLOptimizer] Running Optuna ({n_trials} trials, direction={direction}, mem limit={MAX_MEMORY_GB}GB)...")
 
     study = optuna.create_study(
         direction=direction,
         sampler=optuna.samplers.TPESampler(seed=42),
     )
+
+    # Inject warm start seeds as real completed trials
+    if hpo_seeds:
+        _inject_warm_start_seeds(study, hpo_seeds, X_train_cv_np, y_train_cv,
+                                  cv_folds, task_type, contract, MAX_MEMORY_GB)
 
     with _disable_langsmith_tracing():
         study.optimize(

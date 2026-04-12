@@ -94,6 +94,7 @@ def fill_numeric_slots(template: str, metrics: dict, state: dict) -> str:
         "PSEUDO_LABELS_APPLIED":  str(state.get("pseudo_labels_applied", False)),
         "RUNTIME_SECONDS":        str(state.get("total_runtime_seconds", "N/A")),
         "CRITIC_SEVERITY":        state.get("critic_severity", "unchecked"),
+        "N_SUBMISSIONS_WITH_LB":  str(state.get("n_submissions_with_lb", "N/A")),
     }
     for slot, value in replacements.items():
         template = template.replace("{{" + slot + "}}", value)

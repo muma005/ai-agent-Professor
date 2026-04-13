@@ -8,7 +8,7 @@ capability, including:
 - Version-over-version regression detection
 - Component attribution (which features helped/hurt)
 
-Report schema matches the spec in harness.md section 6.
+Report schema matches the spec in docs/harness.md section 6.
 """
 
 import json

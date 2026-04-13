@@ -220,6 +220,6 @@ If target distribution is not preserved, the split is re-done with seed + 100. M
 
 ## References
 
-- Full specification: `harness.md`
+- Full specification: `docs/harness.md`
 - Contract tests: `simulator/tests/test_simulator_contract.py`
 - Original v1 harness: `tools/harness/` (deprecated, kept for reference)

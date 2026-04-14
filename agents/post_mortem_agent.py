@@ -1,280 +1,450 @@
 # agents/post_mortem_agent.py
 # -------------------------------------------------------------------------
-# Day 11 — Post-Mortem Agent
-# Runs after a competition closes and private LB score is known.
-# Manual trigger — not part of the main pipeline.
-# Three analyses: CV/LB gap root cause, feature retrospective, memory write.
+# Day 27: Post-Mortem Agent
+# Runs manually after a competition closes and private LB score is revealed.
+# Never called automatically by the pipeline.
+#
+# Usage:
+#   python -m professor post-mortem --session abc123 --lb-score 0.8073 --lb-rank 150 --total-teams 1000
+#
+# Outputs:
+#   outputs/{session_id}/competition_memory.json
+#   ChromaDB pattern updates
+#   critic_failure_patterns (if critic missed a leak)
 # -------------------------------------------------------------------------
 
-import os
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def run_post_mortem(
-    session_id: str,
-    lb_score: float,
-    lb_rank: Optional[int] = None,
-    total_competitors: Optional[int] = None,
-) -> dict:
-    """
-    Run post-mortem analysis on a completed competition session.
+# ── Helper ─────────────────────────────────────────────────────────
 
-    Loads session artifacts from outputs/{session_id}/, performs 3 analyses,
-    writes patterns to ChromaDB, and produces post_mortem_report.json.
-
-    Returns the report dict.
-    """
-    if lb_score is None:
-        raise ValueError(
-            "lb_score is required for post-mortem analysis. "
-            "Pass the private LB score from the competition results page."
-        )
-
-    output_dir = f"outputs/{session_id}"
-    if not os.path.isdir(output_dir):
-        raise FileNotFoundError(
-            f"Session directory not found: {output_dir}. "
-            f"Run the competition pipeline first to generate outputs."
-        )
-
-    # -- Load session artifacts --------------------------------------------------
-    def _load_json(filename: str, default=None):
-        path = f"{output_dir}/{filename}"
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
-        return default
-
-    validation_strategy = _load_json("validation_strategy.json", {})
-    critic_verdict      = _load_json("critic_verdict.json", {})
-    feature_importance  = _load_json("feature_importance.json", {})
-    competition_fp      = _load_json("competition_fingerprint.json", {})
-
-    # Derive competition name from session_id
-    competition_name = session_id.rsplit("_", 1)[0] if "_" in session_id else session_id
-
-    # -- Analysis 1: CV/LB Gap Root Cause ----------------------------------------
-    cv_mean = validation_strategy.get("cv_mean", 0.0)
-    cv_std  = validation_strategy.get("cv_std", 0.0)
-    gap     = abs(cv_mean - lb_score)
-
-    critic_severity = critic_verdict.get("overall_severity", "unchecked")
-
-    gap_root_cause, gap_explanation = _classify_gap(
-        gap, cv_std, critic_severity, cv_mean, lb_score,
-    )
-
-    # -- Analysis 2: Feature Retrospective ---------------------------------------
-    feature_retrospective = _build_feature_retrospective(
-        feature_importance=feature_importance,
-        critic_verdict=critic_verdict,
-        features_dropped=[],  # loaded from state if available
-        gap=gap,
-    )
-
-    # -- Analysis 3: Pattern Extraction + Memory Write ---------------------------
-    validated = [
-        {"approach": f["feature"], "cv_improvement": f.get("importance", 0.0),
-         "competitions": [competition_name]}
-        for f in feature_retrospective if f["verdict"] == "helped"
-    ]
-    failed = [
-        {"approach": f["feature"], "cv_degradation": abs(f.get("importance", 0.0)),
-         "competitions": [competition_name]}
-        for f in feature_retrospective if f["verdict"] == "hurt"
-    ]
-
-    # Confidence grows with LB performance
-    if lb_rank and total_competitors and total_competitors > 0:
-        percentile = 1.0 - (lb_rank / total_competitors)
-    else:
-        percentile = 0.5
-    confidence = min(0.9, 0.4 + percentile * 0.5)
-
-    pattern_id = None
-    critic_failures_written = 0
-
+def _load_json(path: Path, default=None):
+    """Load JSON from path, returning default on any error."""
     try:
-        from memory.memory_schema import store_pattern, store_critic_failure_pattern
-
-        if competition_fp:
-            pattern_id = store_pattern(
-                fingerprint=competition_fp,
-                validated_approaches=validated,
-                failed_approaches=failed,
-                competition_name=competition_name,
-                confidence=confidence,
-                cv_lb_gap=gap,
-            )
-
-        # If critic missed leakage, write to critic_failure_patterns
-        if gap_root_cause == "critic_missed" and competition_fp:
-            suspected = _find_suspected_feature(feature_retrospective)
-            store_critic_failure_pattern(
-                fingerprint=competition_fp,
-                missed_issue=(
-                    f"CV/LB gap {gap:.3f} not caught by critic. "
-                    f"Suspected: {suspected}."
-                ),
-                competition_name=competition_name,
-            )
-            critic_failures_written = 1
-
-    except Exception as e:
-        logger.warning(f"[PostMortem] Memory write failed: {e}")
-
-    # -- Build report ------------------------------------------------------------
-    report = {
-        "session_id":              session_id,
-        "competition_name":        competition_name,
-        "cv_mean":                 round(cv_mean, 4),
-        "lb_score":                round(lb_score, 4),
-        "cv_lb_gap":               round(gap, 4),
-        "gap_root_cause":          gap_root_cause,
-        "gap_explanation":         gap_explanation,
-        "feature_retrospective":   feature_retrospective,
-        "patterns_written":        len(validated) + len(failed),
-        "critic_failures_written": critic_failures_written,
-        "pattern_id":              pattern_id,
-        "confidence":              round(confidence, 4),
-        "generated_at":            datetime.now(timezone.utc).isoformat(),
-    }
-
-    report_path = f"{output_dir}/post_mortem_report.json"
-    with open(report_path, "w") as f:
-        json.dump(report, f, indent=2)
-
-    logger.info(f"[PostMortem] Report written: {report_path}")
-    return report
+        return json.loads(path.read_text()) if path.exists() else (default or {})
+    except Exception:
+        return default or {}
 
 
-def _classify_gap(
-    gap: float,
-    cv_std: float,
-    critic_severity: str,
-    cv_mean: float,
-    lb_score: float,
-) -> tuple:
-    """Classify the CV/LB gap root cause. Returns (cause, explanation)."""
-
-    if gap <= 0.02:
-        if critic_severity in ("OK", "unchecked"):
-            return "acceptable", (
-                f"CV/LB gap {gap:.3f} is within acceptable range. "
-                f"CV: {cv_mean:.4f}, LB: {lb_score:.4f}."
-            )
-        else:
-            return "acceptable", (
-                f"CV/LB gap {gap:.3f} is small despite critic severity {critic_severity}."
-            )
-
-    # gap > 0.02
-    if cv_std > 0.02:
-        return "high_variance_cv", (
-            f"CV std {cv_std:.3f} > 0.02 — model is unstable across folds. "
-            f"Gap {gap:.3f} likely due to fold variance, not leakage."
-        )
-
-    if critic_severity in ("OK", "unchecked"):
-        return "critic_missed", (
-            f"Critic approved all features (severity={critic_severity}) but "
-            f"CV/LB gap is {gap:.3f}. Probable undetected leakage or distribution shift."
-        )
-
-    if critic_severity == "CRITICAL":
-        return "known_risk", (
-            f"Critic flagged CRITICAL issues. Gap {gap:.3f} confirms the finding. "
-            f"The risk was known but engineer continued."
-        )
-
-    # HIGH or MEDIUM
-    return "known_risk", (
-        f"Critic flagged {critic_severity} issues. Gap {gap:.3f} "
-        f"confirms partial risk materialised."
-    )
-
-
-def _build_feature_retrospective(
-    feature_importance: dict,
-    critic_verdict: dict,
-    features_dropped: list,
-    gap: float,
-) -> list:
+def _compute_confidence(strategy_eval: dict) -> float:
     """
-    For top-20 features by importance: classify as helped/hurt/noisy.
+    Confidence based on:
+    - CV/LB gap (small gap = high confidence)
+    - LB percentile (top 10% = high confidence)
     """
-    # Get feature importance list (handle both dict and list formats)
-    if isinstance(feature_importance, dict):
-        features = feature_importance.get("features", [])
-    elif isinstance(feature_importance, list):
-        features = feature_importance
-    else:
-        features = []
+    percentile = float(strategy_eval.get("percentile") or 50.0)
+    cv_lb_gap = float(strategy_eval.get("cv_lb_gap") or 0.010)
 
-    # Get critic findings
-    critic_findings = critic_verdict.get("findings", [])
-    flagged_features = set()
-    for finding in critic_findings:
-        if finding.get("severity") in ("HIGH", "CRITICAL"):
-            # Collect features mentioned in replan_instructions
-            ri = finding.get("replan_instructions", {})
-            for feat in ri.get("remove_features", []):
-                flagged_features.add(feat)
-            # Also check top_drift_features
-            for feat in finding.get("top_drift_features", []):
-                flagged_features.add(feat)
+    gap_factor = max(0.0, 1.0 - cv_lb_gap / 0.030)
+    percentile_factor = min(1.0, percentile / 100.0)
 
-    retrospective = []
-    for i, feat_entry in enumerate(features[:20]):
-        if isinstance(feat_entry, dict):
-            name = feat_entry.get("feature", feat_entry.get("name", f"feature_{i}"))
-            importance = feat_entry.get("importance", 0.0)
-            variance = feat_entry.get("fold_variance", 0.0)
-        elif isinstance(feat_entry, str):
-            name = feat_entry
-            importance = 0.0
-            variance = 0.0
-        else:
-            continue
+    return round(min(0.90, 0.40 + 0.30 * gap_factor + 0.20 * percentile_factor), 3)
 
-        is_flagged = name in flagged_features
-        is_dropped = name in features_dropped
 
-        if is_flagged and gap > 0.02:
-            verdict = "hurt"
-        elif variance > 0.1:
-            verdict = "noisy"
-        elif not is_flagged and not is_dropped:
-            verdict = "helped"
-        else:
-            verdict = "helped"
+# ── Section 1: Solution Autopsy ───────────────────────────────────
 
-        retrospective.append({
-            "feature":       name,
-            "importance":    round(importance, 4),
-            "fold_variance": round(variance, 4),
-            "critic_flagged": is_flagged,
-            "dropped":       is_dropped,
-            "verdict":       verdict,
+def _build_solution_autopsy(session_dir: Path, lb_score: float) -> dict:
+    """
+    Analyses which features contributed to the result.
+
+    For each feature that survived null importance filtering:
+      - Was it validated by the critic? (not in critic_verdict findings)
+      - Is it stable? (fold importance variance < 0.02)
+      - Classification: "contributed" | "noise" | "unknown"
+
+    For each feature that was dropped:
+      - What stage dropped it? Stage 1 or Stage 2 null importance?
+      - Was the cv_delta positive (we lost something) or negative (right call)?
+    """
+    metrics = _load_json(session_dir / "metrics.json")
+    null_result = _load_json(session_dir / "null_importance_result.json", default={})
+    critic = _load_json(session_dir / "critic_verdict.json", default={})
+    feat_imp = _load_json(session_dir / "feature_importance.json", default={})
+
+    # Features that survived
+    survived = metrics.get("feature_order", [])
+    dropped_s1 = null_result.get("dropped_stage1", [])
+    dropped_s2 = null_result.get("dropped_stage2", [])
+
+    # Critic findings — which features were flagged
+    flagged_by_critic = set()
+    for finding in critic.get("findings", []):
+        feat = finding.get("feature_flagged", "")
+        if feat:
+            flagged_by_critic.add(feat)
+
+    feature_audit = []
+    for feat in survived:
+        importance = float(feat_imp.get(feat, 0.0))
+        flagged = feat in flagged_by_critic
+        feature_audit.append({
+            "feature": feat,
+            "status": "survived_null_importance",
+            "importance": round(importance, 6),
+            "flagged_by_critic": flagged,
+            "classification": "noise" if flagged else ("contributed" if importance > 0 else "unknown"),
         })
 
-    return retrospective
+    for feat in dropped_s1:
+        feature_audit.append({
+            "feature": feat,
+            "status": "dropped_stage1",
+            "importance": 0.0,
+            "flagged_by_critic": False,
+            "classification": "correctly_pruned",
+        })
+
+    for feat in dropped_s2:
+        feature_audit.append({
+            "feature": feat,
+            "status": "dropped_stage2",
+            "importance": 0.0,
+            "flagged_by_critic": feat in flagged_by_critic,
+            "classification": "correctly_pruned",
+        })
+
+    return {
+        "total_features_trained": len(survived),
+        "total_dropped_stage1": len(dropped_s1),
+        "total_dropped_stage2": len(dropped_s2),
+        "features_flagged_by_critic": len(flagged_by_critic),
+        "feature_audit": feature_audit,
+    }
 
 
-def _find_suspected_feature(retrospective: list) -> str:
-    """Find the most likely feature that caused the CV/LB gap."""
-    # Look for hurt features first
-    hurt = [f for f in retrospective if f["verdict"] == "hurt"]
-    if hurt:
-        return hurt[0]["feature"]
-    # Then noisy features
-    noisy = [f for f in retrospective if f["verdict"] == "noisy"]
-    if noisy:
-        return noisy[0]["feature"]
-    # Fallback
-    return "unknown — manual inspection needed"
+# ── Section 2: Strategy Evaluation ────────────────────────────────
+
+def _build_strategy_evaluation(
+    session_dir: Path,
+    lb_score: float,
+    lb_rank=None,
+    total_teams=None,
+) -> dict:
+    """
+    Evaluates what strategy choices worked and what did not.
+    """
+    metrics = _load_json(session_dir / "metrics.json")
+    ensemble = _load_json(session_dir / "ensemble_selection.json", default={})
+
+    cv_mean = float(metrics.get("cv_mean", 0.0))
+    cv_std = float(metrics.get("cv_std", 0.0))
+    cv_lb_gap = round(abs(cv_mean - lb_score), 6)
+
+    percentile = None
+    if lb_rank and total_teams:
+        percentile = round(100 * (1 - lb_rank / total_teams), 2)
+
+    # Was ensemble better than single model?
+    ensemble_accepted = ensemble.get("ensemble_accepted", False)
+    ensemble_holdout_score = float(ensemble.get("ensemble_holdout_score") or 0.0)
+    n_models_in_ensemble = len(ensemble.get("selected_models", []))
+
+    # CV/LB gap root cause classification
+    critic_verdict = _load_json(session_dir / "critic_verdict.json", default={})
+    critic_ok = critic_verdict.get("overall_severity") == "OK"
+
+    if cv_lb_gap > 0.020 and critic_ok:
+        gap_root_cause = "critic_missed"
+    elif cv_lb_gap > 0.020 and not critic_ok:
+        gap_root_cause = "known_risk"
+    elif cv_std > 0.020:
+        gap_root_cause = "high_variance"
+    else:
+        gap_root_cause = "acceptable"
+
+    return {
+        "cv_mean": round(cv_mean, 6),
+        "cv_std": round(cv_std, 6),
+        "lb_score": round(lb_score, 6),
+        "cv_lb_gap": cv_lb_gap,
+        "gap_root_cause": gap_root_cause,
+        "lb_rank": lb_rank,
+        "total_teams": total_teams,
+        "percentile": percentile,
+        "ensemble_accepted": ensemble_accepted,
+        "ensemble_holdout_score": round(ensemble_holdout_score, 6),
+        "n_models_in_ensemble": n_models_in_ensemble,
+        "winning_model_type": metrics.get("winning_model_type", "unknown"),
+    }
+
+
+# ── Section 3: Structured Memory Writes ───────────────────────────
+
+def _build_memory_writes(
+    session_dir: Path,
+    strategy_eval: dict,
+    solution_autopsy: dict,
+    state: dict,
+) -> list[dict]:
+    """
+    Generates structured memory entries to write to ChromaDB.
+    """
+    brief = _load_json(session_dir / "competition_brief.json", default={})
+    domain = brief.get("domain", "tabular")
+    lb_gap = strategy_eval["cv_lb_gap"]
+    cv = strategy_eval["cv_mean"]
+    lb = strategy_eval["lb_score"]
+
+    writes = []
+
+    # Feature-level findings
+    for item in solution_autopsy.get("feature_audit", []):
+        if item["classification"] == "contributed" and item["importance"] > 0.01:
+            writes.append({
+                "domain": domain,
+                "feature": item["feature"],
+                "cv_delta": item["importance"],
+                "private_lb_delta": item["importance"] * (lb / cv) if cv > 0 else 0.0,
+                "validated": not item["flagged_by_critic"] and lb_gap < 0.010,
+                "reusable": True,
+                "confidence": _compute_confidence(strategy_eval),
+                "finding_type": "feature",
+            })
+        elif item["classification"] == "noise" and item["flagged_by_critic"]:
+            writes.append({
+                "domain": domain,
+                "feature": item["feature"],
+                "cv_delta": 0.0,
+                "private_lb_delta": 0.0,
+                "validated": True,
+                "reusable": True,
+                "confidence": 0.80,
+                "finding_type": "pitfall",
+                "note": "Flagged by critic as noise or leakage. Avoid in future.",
+            })
+
+    # Strategy findings
+    if strategy_eval["ensemble_accepted"] and strategy_eval["ensemble_holdout_score"] > 0:
+        writes.append({
+            "domain": domain,
+            "feature": "diversity_ensemble",
+            "cv_delta": 0.0,
+            "private_lb_delta": 0.0,
+            "validated": lb_gap < 0.010,
+            "reusable": True,
+            "confidence": _compute_confidence(strategy_eval),
+            "finding_type": "strategy",
+            "note": f"Diversity ensemble accepted, holdout={strategy_eval['ensemble_holdout_score']:.5f}",
+        })
+
+    # Model choice finding
+    winning_model = strategy_eval.get("winning_model_type", "unknown")
+    if winning_model != "unknown":
+        writes.append({
+            "domain": domain,
+            "feature": f"model_type_{winning_model}",
+            "cv_delta": 0.0,
+            "private_lb_delta": 0.0,
+            "validated": lb_gap < 0.010,
+            "reusable": True,
+            "confidence": _compute_confidence(strategy_eval),
+            "finding_type": "model_choice",
+            "note": f"{winning_model} won with cv={cv:.5f}, lb={lb:.5f}",
+        })
+
+    return writes
+
+
+# ── Section 4: Critic Calibration ─────────────────────────────────
+
+def _build_critic_calibration(session_dir: Path, lb_score: float, cv_mean: float) -> dict:
+    """
+    Evaluates critic accuracy: how many CRITICAL verdicts were correct vs false positives.
+    Adjusts recommended sensitivity thresholds for future runs.
+
+    A CRITICAL verdict is "correct" if the CV/LB gap is large (gap > 0.010).
+    A CRITICAL verdict is a "false positive" if CV and LB are well-aligned (gap <= 0.005).
+    """
+    critic = _load_json(session_dir / "critic_verdict.json", default={})
+    gap = abs(cv_mean - lb_score)
+
+    overall_severity = critic.get("overall_severity", "unchecked")
+    findings = critic.get("findings", [])
+
+    n_critical = sum(1 for f in findings if f.get("severity") == "CRITICAL")
+    n_high = sum(1 for f in findings if f.get("severity") == "HIGH")
+
+    # Was the critic right?
+    critic_fired = overall_severity in ("CRITICAL", "HIGH")
+    gap_was_large = gap > 0.010
+
+    if critic_fired and gap_was_large:
+        calibration_verdict = "true_positive"
+    elif critic_fired and not gap_was_large:
+        calibration_verdict = "false_positive"
+    elif not critic_fired and gap_was_large:
+        calibration_verdict = "false_negative"
+    else:
+        calibration_verdict = "true_negative"
+
+    # Threshold adjustment recommendation
+    if calibration_verdict == "false_positive":
+        threshold_recommendation = "consider_raising_thresholds"
+        threshold_note = (
+            "Critic fired but CV/LB gap was small. "
+            "ECE threshold or adversarial AUC threshold may be too sensitive."
+        )
+    elif calibration_verdict == "false_negative":
+        threshold_recommendation = "consider_lowering_thresholds"
+        threshold_note = (
+            "Critic did not fire but CV/LB gap was large. "
+            "A leakage pattern was missed. "
+            "This finding is written to critic_failure_patterns."
+        )
+    else:
+        threshold_recommendation = "thresholds_appropriate"
+        threshold_note = "Critic verdict consistent with private LB outcome."
+
+    return {
+        "overall_severity": overall_severity,
+        "n_critical_findings": n_critical,
+        "n_high_findings": n_high,
+        "cv_lb_gap": round(gap, 6),
+        "calibration_verdict": calibration_verdict,
+        "threshold_recommendation": threshold_recommendation,
+        "threshold_note": threshold_note,
+        "vectors_checked": critic.get("vectors_checked", []),
+    }
+
+
+# ── ChromaDB / Critic Failure writes ──────────────────────────────
+
+def _write_to_chromadb(report: dict, session_id: str) -> None:
+    """Writes memory_writes to ChromaDB professor_patterns_v2 collection."""
+    try:
+        from memory.memory_schema import store_pattern, fingerprint_to_text
+
+        brief_path = Path(f"outputs/{session_id}/competition_brief.json")
+        if not brief_path.exists():
+            logger.warning("[post_mortem] competition_brief.json missing — ChromaDB write skipped.")
+            return
+
+        brief = json.loads(brief_path.read_text())
+
+        # Build a simple fingerprint from the brief
+        fingerprint = {
+            "task_type": brief.get("task_type", "binary_classification"),
+            "n_rows_bucket": brief.get("n_rows_bucket", "medium"),
+            "imbalance_ratio": brief.get("imbalance_ratio", 0.5),
+        }
+
+        validated = [
+            w for w in report["memory_writes"]
+            if w.get("validated") and w.get("finding_type") == "feature"
+        ]
+        failed = [
+            w["feature"] for w in report["memory_writes"]
+            if w.get("finding_type") == "pitfall"
+        ]
+
+        if validated or failed:
+            store_pattern(
+                fingerprint=fingerprint,
+                validated_approaches=[{"approach": w["feature"], "cv_improvement": w.get("cv_delta", 0)} for w in validated],
+                failed_approaches=failed,
+                competition_name=brief.get("competition_name", session_id),
+                confidence=report["strategy_evaluation"].get("cv_mean", 0.70),
+            )
+            logger.info(
+                f"[post_mortem] ChromaDB: {len(validated)} validated approaches, "
+                f"{len(failed)} failed approaches written."
+            )
+
+    except Exception as e:
+        logger.warning(f"[post_mortem] ChromaDB write failed: {e}")
+
+
+def _write_critic_failure_pattern(
+    session_dir: Path,
+    strategy_eval: dict,
+    metrics: dict,
+) -> None:
+    """Writes to critic_failure_patterns when critic missed a large CV/LB gap."""
+    try:
+        from memory.memory_schema import store_critic_failure_pattern
+        brief_path = session_dir / "competition_brief.json"
+        if not brief_path.exists():
+            return
+        brief = json.loads(brief_path.read_text())
+        store_critic_failure_pattern(
+            fingerprint=brief.get("fingerprint", {}),
+            missed_issue="critic_missed_cv_lb_gap",
+            competition_name=brief.get("competition_name", "unknown"),
+            feature_flagged="unknown_leakage",
+            failure_mode="critic_missed_cv_lb_gap",
+            cv_lb_gap=strategy_eval["cv_lb_gap"],
+            confidence=0.70,
+        )
+    except Exception as e:
+        logger.warning(f"[post_mortem] critic_failure_pattern write failed: {e}")
+
+
+# ── Main entry point ──────────────────────────────────────────────
+
+def run_post_mortem_agent(
+    session_id: str,
+    lb_score: float,
+    lb_rank=None,
+    total_teams=None,
+) -> dict:
+    """
+    Main entry point for post-mortem analysis.
+    Reads all data from outputs/{session_id}/.
+    Writes competition_memory.json and updates ChromaDB.
+    Never raises — returns error dict on failure.
+    """
+    session_dir = Path(f"outputs/{session_id}")
+    if not session_dir.exists():
+        return {"error": f"Session directory not found: {session_dir}"}
+
+    metrics_path = session_dir / "metrics.json"
+    if not metrics_path.exists():
+        return {"error": f"metrics.json not found in {session_dir}. Did the pipeline complete?"}
+
+    metrics = _load_json(metrics_path)
+    cv_mean = float(metrics.get("cv_mean", 0.0))
+
+    # Build the four sections
+    solution_autopsy = _build_solution_autopsy(session_dir, lb_score)
+    strategy_evaluation = _build_strategy_evaluation(session_dir, lb_score, lb_rank, total_teams)
+    memory_writes = _build_memory_writes(session_dir, strategy_evaluation, solution_autopsy, {})
+    critic_calibration = _build_critic_calibration(session_dir, lb_score, cv_mean)
+
+    # Compose the full report
+    report = {
+        "session_id": session_id,
+        "lb_score": round(lb_score, 6),
+        "lb_rank": lb_rank,
+        "total_teams": total_teams,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "solution_autopsy": solution_autopsy,
+        "strategy_evaluation": strategy_evaluation,
+        "memory_writes": memory_writes,
+        "critic_calibration": critic_calibration,
+        "n_memory_writes": len(memory_writes),
+    }
+
+    # Write competition_memory.json
+    output_path = session_dir / "competition_memory.json"
+    output_path.write_text(json.dumps(report, indent=2))
+    logger.info(f"[post_mortem] competition_memory.json written to {output_path}")
+
+    # Write to ChromaDB
+    _write_to_chromadb(report, session_id)
+
+    # Write to critic_failure_patterns if critic missed a leak
+    if critic_calibration["calibration_verdict"] == "false_negative":
+        _write_critic_failure_pattern(session_dir, strategy_evaluation, metrics)
+
+    logger.info(
+        f"[post_mortem] Complete: {len(memory_writes)} memory writes, "
+        f"critic={critic_calibration['calibration_verdict']}, "
+        f"gap_root_cause={strategy_evaluation['gap_root_cause']}"
+    )
+
+    return report

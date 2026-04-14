@@ -152,4 +152,4 @@ professor-agent/
 
 ## Dependencies
 
-All dependencies are pinned in `requirements.txt`. **DO NOT** run `pip upgrade` during the 30-day build. Library updates are a Month 2 activity.
+All dependencies are pinned in `requirements.txt`. **DO NOT** run `pip upgrade` during the 30-day build. Library updates are a Month 2 activity,

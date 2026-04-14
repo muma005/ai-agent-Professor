@@ -79,6 +79,23 @@ def _check_shuffled_target(
                         "rerun_nodes": ["feature_factory", "ml_optimizer"],
                     },
                 }
+        else:
+            # Numeric: check correlation with target
+            if feat.dtype != y_arr.dtype:
+                feat = feat.astype(y_arr.dtype)
+            corr = np.corrcoef(feat, y_arr)[0, 1]
+            if not np.isnan(corr) and abs(corr) > 0.95:
+                return {
+                    "verdict":      "CRITICAL",
+                    "auc_shuffled": None,
+                    "threshold":    "high_correlation",
+                    "evidence":     f"Feature '{col}' has correlation {corr:.4f} with target (> 0.95). Direct target leakage.",
+                    "action":       f"Remove feature '{col}' immediately — it encodes the target.",
+                    "replan_instructions": {
+                        "remove_features": [col],
+                        "rerun_nodes": ["feature_factory", "ml_optimizer"],
+                    },
+                }
 
     # --- Model-based shuffled target test ---
     if target_type in ("binary", "multiclass"):

@@ -484,17 +484,79 @@ def run_null_importance_filter(
             elapsed_seconds=time.time() - t_start,
         )
 
-    # Stage 2 — persistent sandbox
+    # Stage 2 — Lightning offload or persistent sandbox
     X_survivors = X.select(s1_survivors)
-    s2_survivors, s2_dropped, null_dists, threshold_pcts = \
-        _run_stage2_null_importance_persistent_sandbox(
-            X_survivors=X_survivors,
-            y=y,
-            survivor_names=s1_survivors,
-            n_shuffles=n_stage2_shuffles,
-            task_type=task_type,
-            threshold_percentile=stage2_threshold_percentile,
+    
+    # ── Lightning Offload Hook ─────────────────────────────────────────
+    import os
+    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
+    USE_LIGHTNING_NI = (
+        is_lightning_configured() and
+        os.getenv("LIGHTNING_OFFLOAD_NULL_IMPORTANCE", "0") == "1"
+    )
+    
+    s2_survivors = None
+    s2_dropped = None
+    null_dists = {}
+    threshold_pcts = {}
+    
+    if USE_LIGHTNING_NI:
+        logger.info("[NullImportance] ⚡ Offloading Stage 2 to Lightning AI...")
+        # We need to write survivors list and training data  
+        # Derive a session_id-like identifier for file paths
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="null_imp_")
+        surv_path = os.path.join(tmp_dir, "stage1_survivors.json")
+        train_tmp = os.path.join(tmp_dir, "train.csv")
+        
+        with open(surv_path, "w") as f:
+            json.dump(s1_survivors, f)
+        
+        # Write X + y as CSV for Lightning
+        df_for_lightning = X_survivors.clone()
+        target_col_name = "__target__"
+        df_for_lightning = df_for_lightning.with_columns(pl.Series(target_col_name, y))
+        df_for_lightning.write_csv(train_tmp)
+        
+        session_id = f"null_imp_{int(time.time())}"
+        synced = sync_files_to_lightning(
+            session_id=session_id,
+            files={
+                train_tmp: "train.csv",
+                surv_path: "stage1_survivors.json",
+            }
         )
+        if synced:
+            machine = os.getenv("LIGHTNING_NULL_IMPORTANCE_MACHINE", "CPU")
+            res = run_on_lightning(
+                script="tools/lightning_jobs/run_null_importance.py",
+                args={"session_id": session_id, "target_col": target_col_name, "task_type": task_type},
+                job_name=f"null_imp_{session_id}",
+                machine=machine,
+                interruptible=True,
+                result_path=os.path.join(tmp_dir, "null_importance_stage2_result.json"),
+            )
+            if res["success"] and res["result"].get("success"):
+                lightning_data = res["result"]
+                s2_survivors = lightning_data.get("survivors", s1_survivors)
+                s2_dropped = lightning_data.get("dropped_stage2", [])
+                logger.info(f"[NullImportance] Lightning returned {len(s2_survivors)} Stage 2 survivors.")
+            else:
+                logger.warning(f"[NullImportance] Lightning failed: {res.get('error')}. Running locally.")
+                USE_LIGHTNING_NI = False
+        else:
+            USE_LIGHTNING_NI = False
+    
+    if not USE_LIGHTNING_NI:
+        s2_survivors, s2_dropped, null_dists, threshold_pcts = \
+            _run_stage2_null_importance_persistent_sandbox(
+                X_survivors=X_survivors,
+                y=y,
+                survivor_names=s1_survivors,
+                n_shuffles=n_stage2_shuffles,
+                task_type=task_type,
+                threshold_percentile=stage2_threshold_percentile,
+            )
 
     # Build actual_vs_threshold comparison dict
     actual_vs_threshold = {}

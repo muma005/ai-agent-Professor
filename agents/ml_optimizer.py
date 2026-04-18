@@ -1395,93 +1395,177 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
 
     print(f"[MLOptimizer] Running Optuna ({n_trials} trials, direction={direction}, mem limit={MAX_MEMORY_GB}GB)...")
 
-    study = optuna.create_study(
-        direction=direction,
-        sampler=optuna.samplers.TPESampler(seed=42),
+    # ── Lightning Offload Hook ─────────────────────────────────────────
+    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
+    USE_LIGHTNING_OPTUNA = (
+        is_lightning_configured() and
+        os.getenv("LIGHTNING_OFFLOAD_OPTUNA", "0") == "1"
     )
-
-    # Inject warm start seeds as real completed trials
-    if hpo_seeds:
-        _inject_warm_start_seeds(study, hpo_seeds, X_train_cv_np, y_train_cv,
-                                  cv_folds, task_type, contract, MAX_MEMORY_GB)
-
-    with _disable_langsmith_tracing():
-        study.optimize(
-            lambda trial: _objective(
-                trial, X_train_cv_np, y_train_cv, cv_folds, task_type, contract, 
-                MAX_MEMORY_GB,
-                target_enc_cols=target_enc_cols,
-                agg_candidates=agg_candidates,
-                feature_cols=feature_names,
-            ),
-            n_trials=n_trials,
-            n_jobs=1,
-            gc_after_trial=True,
-            callbacks=[_memory_callback(MAX_MEMORY_GB)],
-        )
-
-    # ── Phase 2: Top-K by mean_cv → stability re-run ─────────────
-    completed = [
-        t for t in study.trials
-        if t.state == optuna.trial.TrialState.COMPLETE
-        and t.user_attrs.get("fold_scores")
-    ]
-
-    # Validate Optuna completed successfully
-    if len(completed) == 0:
-        logger.error("[MLOptimizer] No Optuna trials completed successfully!")
-        logger.error(f"[MLOptimizer] Study state: {study.user_attrs}")
-        logger.warning("[MLOptimizer] Falling back to default LightGBM model")
-        
-        # Use default model as fallback
-        best_config = {
-            "model_type": "lgbm",
-            "n_estimators": 100,
-            "learning_rate": 0.1,
-            "max_depth": 5,
+    
+    if USE_LIGHTNING_OPTUNA:
+        logger.info("[MLOptimizer] ⚡ Offloading Optuna + Stability to Lightning AI...")
+        # Build meta.json for the cloud script
+        meta = {
+            "task_type": task_type,
+            "n_trials": n_trials,
+            "models_to_try": models_to_try,
+            "cv_folds": len(cv_folds),
         }
-        best_stability = type('obj', (object,), {
-            'mean': 0.5,
-            'std': 0.1,
-            'stability_score': 0.35,
-            'seed_results': [0.5, 0.5, 0.5, 0.5, 0.5],
-        })()
-        top_k_trials = []
-    else:
-        if direction == "minimize":
-            completed.sort(key=lambda t: t.user_attrs["mean_cv"])
+        meta_path_tmp = os.path.join(output_dir, "meta.json")
+        order_path_tmp = os.path.join(output_dir, "feature_order.json")
+        
+        with open(meta_path_tmp, "w") as f:
+            json.dump(meta, f)
+        with open(order_path_tmp, "w") as f:
+            json.dump(feature_names, f)
+
+        target_col = state.get("target_col", "")
+        synced = sync_files_to_lightning(
+            session_id=session_id,
+            files={
+                state.get("clean_data_path", ""): "train.csv",
+                meta_path_tmp: "meta.json",
+                order_path_tmp: "feature_order.json",
+            }
+        )
+        if synced:
+            machine = os.getenv("LIGHTNING_OPTUNA_MACHINE", "CPU")
+            res = run_on_lightning(
+                script="tools/lightning_jobs/run_optuna.py",
+                args={"session_id": session_id, "target_col": target_col},
+                job_name=f"optuna_{session_id}",
+                machine=machine,
+                interruptible=True,
+                result_path=f"{output_dir}/optuna_result.json",
+            )
+            if res["success"] and res["result"].get("success"):
+                optuna_data = res["result"]
+                state["lightning_optuna_link"] = res["job_link"]
+                state["lightning_optuna_runtime"] = res["runtime_s"]
+                
+                # Chain: run stability validator on top of optuna results
+                stab_res = run_on_lightning(
+                    script="tools/lightning_jobs/run_stability_validator.py",
+                    args={"session_id": session_id, "target_col": target_col, "task_type": task_type},
+                    job_name=f"stability_{session_id}",
+                    machine=machine,
+                    interruptible=True,
+                    result_path=f"{output_dir}/stability_result.json",
+                )
+                
+                if stab_res["success"] and stab_res["result"].get("success"):
+                    stab_data = stab_res["result"]
+                    winner = stab_data.get("winner", {})
+                    best_config = winner.get("params", {})
+                    best_stability = type('obj', (object,), {
+                        'mean': winner.get("mean", 0.5),
+                        'std': winner.get("std", 0.1),
+                        'stability_score': winner.get("stability_score", 0.35),
+                        'seed_results': winner.get("seed_results", [0.5]*5),
+                    })()
+                    top_k_trials = []  # Already resolved
+                    completed = []  # Skip local Optuna loop
+                    state["lightning_stability_link"] = stab_res["job_link"]
+                    state["lightning_stability_runtime"] = stab_res["runtime_s"]
+                    logger.info(f"[MLOptimizer] Lightning Optuna+Stability complete. Best CV: {winner.get('mean', 'N/A')}")
+                else:
+                    logger.warning(f"[MLOptimizer] Lightning stability failed: {stab_res.get('error')}. Running locally.")
+                    USE_LIGHTNING_OPTUNA = False
+            else:
+                logger.warning(f"[MLOptimizer] Lightning Optuna failed: {res.get('error')}. Running locally.")
+                USE_LIGHTNING_OPTUNA = False
         else:
-            completed.sort(key=lambda t: t.user_attrs["mean_cv"], reverse=True)
+            USE_LIGHTNING_OPTUNA = False
 
-        top_k_trials = completed[:TOP_K_FOR_STABILITY]
-
-        logger.info(
-            f"[ml_optimizer] Optuna complete: {len(completed)} trials. "
-            f"Re-running top {len(top_k_trials)} configs with {N_STABILITY_SEEDS} seeds."
+    if not USE_LIGHTNING_OPTUNA:
+        # ── ORIGINAL LOCAL CODE — unchanged ──────────────────────────
+        study = optuna.create_study(
+            direction=direction,
+            sampler=optuna.samplers.TPESampler(seed=42),
         )
 
-        def _train_fn(config: dict, seed: int) -> float:
-            model_type = config.get("model_type", "lgbm")
-            if model_type == "catboost":
-                params = {**config, "random_seed": seed}
-            else:
-                params = {**config, "random_state": seed}
-            fold_scores = _run_cv_no_collect(X_train_cv_np, y_train_cv, params, cv_folds, task_type, contract)
-            return float(np.mean(fold_scores))
+        # Inject warm start seeds as real completed trials
+        if hpo_seeds:
+            _inject_warm_start_seeds(study, hpo_seeds, X_train_cv_np, y_train_cv,
+                                      cv_folds, task_type, contract, MAX_MEMORY_GB)
 
-        top_k_configs     = [t.user_attrs["params"] for t in top_k_trials]
-        stability_results = [
-            run_with_seeds(config=cfg, train_fn=_train_fn)
-            for cfg in top_k_configs
+        with _disable_langsmith_tracing():
+            study.optimize(
+                lambda trial: _objective(
+                    trial, X_train_cv_np, y_train_cv, cv_folds, task_type, contract, 
+                    MAX_MEMORY_GB,
+                    target_enc_cols=target_enc_cols,
+                    agg_candidates=agg_candidates,
+                    feature_cols=feature_names,
+                ),
+                n_trials=n_trials,
+                n_jobs=1,
+                gc_after_trial=True,
+                callbacks=[_memory_callback(MAX_MEMORY_GB)],
+            )
+
+        # ── Phase 2: Top-K by mean_cv → stability re-run ─────────────
+        completed = [
+            t for t in study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+            and t.user_attrs.get("fold_scores")
         ]
 
-        ranked = rank_by_stability(top_k_configs, stability_results)
-        best_config, best_stability = ranked[0]
+        # Validate Optuna completed successfully
+        if len(completed) == 0:
+            logger.error("[MLOptimizer] No Optuna trials completed successfully!")
+            logger.error(f"[MLOptimizer] Study state: {study.user_attrs}")
+            logger.warning("[MLOptimizer] Falling back to default LightGBM model")
+            
+            # Use default model as fallback
+            best_config = {
+                "model_type": "lgbm",
+                "n_estimators": 100,
+                "learning_rate": 0.1,
+                "max_depth": 5,
+            }
+            best_stability = type('obj', (object,), {
+                'mean': 0.5,
+                'std': 0.1,
+                'stability_score': 0.35,
+                'seed_results': [0.5, 0.5, 0.5, 0.5, 0.5],
+            })()
+            top_k_trials = []
+        else:
+            if direction == "minimize":
+                completed.sort(key=lambda t: t.user_attrs["mean_cv"])
+            else:
+                completed.sort(key=lambda t: t.user_attrs["mean_cv"], reverse=True)
 
-        logger.info(
-            f"[ml_optimizer] Stability ranking:\n"
-            f"{format_stability_report(ranked, top_n=3)}"
-        )
+            top_k_trials = completed[:TOP_K_FOR_STABILITY]
+
+            logger.info(
+                f"[ml_optimizer] Optuna complete: {len(completed)} trials. "
+                f"Re-running top {len(top_k_trials)} configs with {N_STABILITY_SEEDS} seeds."
+            )
+
+            def _train_fn(config: dict, seed: int) -> float:
+                model_type = config.get("model_type", "lgbm")
+                if model_type == "catboost":
+                    params = {**config, "random_seed": seed}
+                else:
+                    params = {**config, "random_state": seed}
+                fold_scores = _run_cv_no_collect(X_train_cv_np, y_train_cv, params, cv_folds, task_type, contract)
+                return float(np.mean(fold_scores))
+
+            top_k_configs     = [t.user_attrs["params"] for t in top_k_trials]
+            stability_results = [
+                run_with_seeds(config=cfg, train_fn=_train_fn)
+                for cfg in top_k_configs
+            ]
+
+            ranked = rank_by_stability(top_k_configs, stability_results)
+            best_config, best_stability = ranked[0]
+
+            logger.info(
+                f"[ml_optimizer] Stability ranking:\n"
+                f"{format_stability_report(ranked, top_n=3)}"
+            )
 
     # ── Phase 3: Train final model ────────────────────────────────
     best_model_type = best_config.get("model_type", "lgbm")

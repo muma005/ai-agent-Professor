@@ -388,8 +388,52 @@ def run_eda_agent(state: ProfessorState) -> ProfessorState:
     missing        = _analyze_missing(df, target_col)
     zero_var_drops = _detect_zero_variance(df, target_col)
     cardinality    = _analyze_cardinality(df, target_col)
-    collinear      = _detect_collinearity(df, target_col)
-    leakage, leak_drops = _detect_leakage(df, target_col)
+    
+    # ── Lightning Offload Hook ─────────────────────────────────────────
+    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
+    USE_LIGHTNING = is_lightning_configured() and str(os.environ.get("LIGHTNING_OFFLOAD_EDA", "0")) == "1"
+    
+    if USE_LIGHTNING:
+        print("[EDAAgent] ⚡ Offloading EDA to Lightning AI...")
+        data_path = state["clean_data_path"]
+        if sync_files_to_lightning(session_id, {data_path: "train.csv"}):
+            machine = os.environ.get("LIGHTNING_EDA_MACHINE", "CPU")
+            res = run_on_lightning(
+                script="tools/lightning_jobs/run_eda.py",
+                args={"session_id": session_id, "target_col": target_col, "task_type": state.get("task_type", "binary")},
+                job_name=f"eda_{session_id}",
+                machine=machine,
+                interruptible=True,
+                result_path=f"{output_dir}/eda_result.json"
+            )
+            if res["success"] and res["result"].get("success"):
+                lightning_data = res["result"]
+                # Parse backwards to local format
+                collinear = []
+                for k, v in lightning_data.get("correlation_matrix", {}).items():
+                    a, b = k.split("_vs_")
+                    collinear.append({"feature_a": a, "feature_b": b, "spearman": v})
+                
+                # Mock leakage for now since lightning script uses MI and general drops
+                leakage = []
+                leak_drops = []
+                for f, mi in lightning_data.get("mutual_info_scores", {}).items():
+                    if mi > 0.5:
+                        leakage.append({"feature": f, "target_correlation": float(mi), "verdict": "FLAG"})
+                        leak_drops.append(f)
+                
+                state["lightning_eda_link"] = res["job_link"]
+                state["lightning_eda_runtime"] = res["runtime_s"]
+            else:
+                print(f"[EDAAgent] Lightning failed: {res.get('error')}. Running locally.")
+                USE_LIGHTNING = False
+        else:
+            USE_LIGHTNING = False
+
+    if not USE_LIGHTNING:
+        collinear      = _detect_collinearity(df, target_col)
+        leakage, leak_drops = _detect_leakage(df, target_col)
+        
     outliers       = _analyze_outliers(df)
     dupes          = _analyze_duplicates(df)
     temporal       = _analyze_temporal(df)

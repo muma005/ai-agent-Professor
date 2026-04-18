@@ -1056,7 +1056,7 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
 
     X_train = df.drop(target_col)
 
-    # -- Run all 6 vectors -------------------------------------------------------
+    # -- Run all vectors -------------------------------------------------------
     vectors_checked = []
     findings        = []
 
@@ -1067,9 +1067,78 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
         if verdict != "OK":
             findings.append({"severity": verdict, "vector": name, **result})
 
+    # ── Lightning Offload Hook ─────────────────────────────────────────
+    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
+    USE_LIGHTNING_CRITIC = (
+        is_lightning_configured() and
+        os.getenv("LIGHTNING_OFFLOAD_CRITIC", "0") == "1"
+    )
+    
+    if USE_LIGHTNING_CRITIC:
+        logger.info(f"[{AGENT_NAME}] ⚡ Offloading critic checks to Lightning AI...")
+        files_to_sync = {feature_data_path: "train.csv"}
+        if test_path and os.path.exists(test_path):
+            files_to_sync[test_path] = "test.csv"
+        
+        # Write model registry for the cloud script
+        registry_tmp = os.path.join(output_dir, "model_registry.json")
+        model_reg = state.get("model_registry", [])
+        with open(registry_tmp, "w") as f:
+            json.dump(model_reg if model_reg else [], f)
+        files_to_sync[registry_tmp] = "model_registry.json"
+        
+        synced = sync_files_to_lightning(session_id=session_id, files=files_to_sync)
+        if synced:
+            machine = os.getenv("LIGHTNING_CRITIC_MACHINE", "CPU")
+            res = run_on_lightning(
+                script="tools/lightning_jobs/run_critic_checks.py",
+                args={"session_id": session_id, "target_col": target_col, "task_type": target_type},
+                job_name=f"critic_{session_id}",
+                machine=machine,
+                interruptible=True,
+                result_path=f"{output_dir}/critic_checks_result.json",
+            )
+            if res["success"] and res["result"].get("success"):
+                lightning_data = res["result"]
+                # Merge Lightning adversarial + permutation findings
+                perm = lightning_data.get("permutation", {})
+                adv = lightning_data.get("adversarial", {})
+                
+                if perm.get("spurious_features"):
+                    findings.append({
+                        "severity": "WARNING",
+                        "vector": "permutation_importance",
+                        "verdict": "WARNING",
+                        "spurious_features": perm["spurious_features"],
+                        "baseline_score": perm.get("baseline_score"),
+                    })
+                    vectors_checked.append("permutation_importance")
+                    
+                if adv.get("verdict") == "HIGH":
+                    findings.append({
+                        "severity": "WARNING",
+                        "vector": "adversarial_classifier",
+                        "verdict": "WARNING",
+                        "auc": adv.get("auc"),
+                        "note": adv.get("note", ""),
+                    })
+                
+                state["lightning_critic_link"] = res["job_link"]
+                state["lightning_critic_runtime"] = res["runtime_s"]
+                logger.info(f"[{AGENT_NAME}] Lightning critic complete. Permutation AUC: {adv.get('auc', 'N/A')}")
+            else:
+                logger.warning(f"[{AGENT_NAME}] Lightning failed: {res.get('error')}. Running locally.")
+                USE_LIGHTNING_CRITIC = False
+        else:
+            USE_LIGHTNING_CRITIC = False
+
+    # Run local vectors (always run these — they're fast)
     _run_vector("shuffled_target",       _check_shuffled_target(X_train, df[target_col], target_type))
     _run_vector("id_only_model",         _check_id_only_model(df, target_col, target_type, schema))
-    _run_vector("adversarial_classifier", _check_adversarial_classifier(df, test_df or pl.DataFrame(), target_col))
+    
+    if not USE_LIGHTNING_CRITIC:
+        _run_vector("adversarial_classifier", _check_adversarial_classifier(df, test_df or pl.DataFrame(), target_col))
+    
     _run_vector("preprocessing_audit",   _check_preprocessing_leakage(de_code))
 
     imbalance_ratio = eda_report.get("target_distribution", {}).get("imbalance_ratio", 1.0)

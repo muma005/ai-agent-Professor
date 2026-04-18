@@ -1262,7 +1262,65 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
     
     # Evaluation Gates
     survivors = set(final_aug_cols)
-    if y is not None and len(survivors) > 0:
+    
+    # ── Lightning Offload Hook ─────────────────────────────────────────
+    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
+    USE_LIGHTNING_FT = (
+        is_lightning_configured() and
+        os.getenv("LIGHTNING_OFFLOAD_FEATURE_TESTING", "0") == "1"
+    )
+    
+    if USE_LIGHTNING_FT and y is not None and len(survivors) > 0:
+        logger.info("[FeatureFactory] ⚡ Offloading feature testing to Lightning AI...")
+        # Build candidate manifest for the cloud script
+        candidates_for_cloud = []
+        for c in valid_candidates:
+            if c.name in survivors:
+                candidates_for_cloud.append({
+                    "name": c.name,
+                    "expression": getattr(c, "expression", ""),
+                    "source_columns": list(getattr(c, "source_columns", [])),
+                    "transform": getattr(c, "transform", ""),
+                })
+        
+        import tempfile
+        candidates_tmp = os.path.join(output_dir, "feature_candidates.json")
+        with open(candidates_tmp, "w") as f:
+            json.dump(candidates_for_cloud, f)
+        
+        synced = sync_files_to_lightning(
+            session_id=session_id,
+            files={
+                clean_path: "train.csv",
+                candidates_tmp: "feature_candidates.json",
+            }
+        )
+        if synced:
+            machine = os.getenv("LIGHTNING_FEATURE_TESTING_MACHINE", "CPU")
+            res = run_on_lightning(
+                script="tools/lightning_jobs/run_feature_testing.py",
+                args={"session_id": session_id, "target_col": state.get("target_col", ""), "task_type": state.get("task_type", "binary")},
+                job_name=f"feat_test_{session_id}",
+                machine=machine,
+                interruptible=True,
+                result_path=f"{output_dir}/feature_testing_result.json",
+            )
+            if res["success"] and res["result"].get("success"):
+                lightning_survivors = res["result"].get("survivors", [])
+                survivors = set(lightning_survivors)
+                state["lightning_feature_testing_link"] = res["job_link"]
+                state["lightning_feature_testing_runtime"] = res["runtime_s"]
+                logger.info(f"[FeatureFactory] Lightning returned {len(survivors)} survivors.")
+                USE_LIGHTNING_FT = True  # skip local
+            else:
+                logger.warning(f"[FeatureFactory] Lightning failed: {res.get('error')}. Running locally.")
+                USE_LIGHTNING_FT = False
+        else:
+            USE_LIGHTNING_FT = False
+    else:
+        USE_LIGHTNING_FT = False
+    
+    if not USE_LIGHTNING_FT and y is not None and len(survivors) > 0:
         survivor_list, temp_state = _apply_null_importance_filter(state, X_aug.select(final_aug_cols), y)
         state.update(temp_state)
         survivors = set(survivor_list)

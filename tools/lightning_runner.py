@@ -86,18 +86,18 @@ def run_on_lightning(
     NEVER raises. Returns success=False with error message on any failure.
     The caller always checks success and falls back to local execution.
     """
-    from lightning_sdk import Studio, Machine
-
-    MACHINE_MAP = {
-        "CPU":  Machine.CPU_SMALL,
-        "L4":   Machine.L4,
-        "L40S": Machine.L40S,
-        "A10G": Machine.A10G,
-    }
-
     t_start = time.time()
 
     try:
+        from lightning_sdk import Studio, Machine
+
+        MACHINE_MAP = {
+            "CPU":  Machine.CPU_SMALL,
+            "L4":   Machine.L4,
+            "L40S": Machine.L40S,
+            "A100": Machine.A100,
+        }
+
         machine_obj  = MACHINE_MAP.get(machine, Machine.CPU_SMALL)
         studio_name  = os.environ["LIGHTNING_STUDIO_NAME"]
         teamspace    = os.getenv("LIGHTNING_TEAMSPACE") or None

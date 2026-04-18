@@ -904,7 +904,7 @@ def run_professor(
         
     except Exception as e:
         # General pipeline failure
-        error_context.record_error(e, node=error_context.context.get("current_node"), traceback_str=traceback.format_exc())
+        error_context.record_error(e, node_name=error_context.context.get("current_node"), traceback_str=traceback.format_exc())
         error_context.fail()
         
         # Save failure checkpoint for recovery

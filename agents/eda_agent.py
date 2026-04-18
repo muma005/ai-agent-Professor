@@ -348,15 +348,16 @@ def run_eda_agent(state: ProfessorState) -> ProfessorState:
     
     if config.agents.skip_eda:
         print("[EDAAgent] Skipping (fast mode)")
-        session_id = state["session_id"]
-        output_dir = f"outputs/{session_id}"
-        os.makedirs(output_dir, exist_ok=True)
         
-        # Set empty outputs
-        state["eda_report_path"] = None
-        state["eda_report"] = {}
-        state["dropped_features"] = []
-        return state
+        # Return fallback items so Integrity Gate doesn't crash
+        return {
+            "eda_report_path": "skipped",
+            "eda_report": {
+                "status": "skipped", 
+                "target_distribution": {"imbalance_ratio": 1.0}
+            },
+            "dropped_features": []
+        }
     
     session_id = state["session_id"]
     output_dir = f"outputs/{session_id}"

@@ -54,6 +54,23 @@ class CompetitionEntry:
     primary_domain: str = "general"
     sub_domain: str = ""
 
+    def get_data_dir(self):
+        """Returns the base data directory for this competition inside simulator space."""
+        from pathlib import Path
+        return Path("simulator/data") / self.slug
+
+    def get_train_path(self):
+        """Returns the path to the split train.csv used by Professor."""
+        return self.get_data_dir() / "split" / "train.csv"
+
+    def get_test_path(self):
+        """Returns the path to the split test.csv used by Professor (features only)."""
+        return self.get_data_dir() / "split" / "test.csv"
+
+    def get_sample_submission_path(self):
+        """Returns the path to the split sample_submission.csv."""
+        return self.get_data_dir() / "split" / "sample_submission.csv"
+
 
 # ════════════════════════════════════════════════════════════
 # REGISTRY — Start with 3 competitions, expand over time

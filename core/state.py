@@ -6,6 +6,8 @@ import uuid
 import hashlib
 from datetime import datetime, timezone
 
+from core.config import ProfessorConfig
+
 
 # ── Custom reducers for LangGraph state channels ─────────────────
 # LangGraph uses reducers to merge state between nodes.
@@ -281,8 +283,6 @@ def initial_state(
     Returns:
         ProfessorState initialized with default values
     """
-    # Import here to avoid circular dependency
-    from core.config import ProfessorConfig
     
     # Load config from parameter or environment
     if config is None:
@@ -291,7 +291,7 @@ def initial_state(
     # Apply config to environment (ensures all components see it)
     config.apply_env()
     
-    session_id = f"{competition[:8].replace(' ', '_')}_{uuid.uuid4().hex[:8]}"
+    session_id = generate_session_id(competition)
 
     return ProfessorState(
         session_id=session_id,

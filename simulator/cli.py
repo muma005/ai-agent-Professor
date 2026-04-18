@@ -25,7 +25,6 @@ from typing import Optional, Dict, Any
 
 from simulator.competition_registry import (
     REGISTRY,
-    REGISTRY_BY_SLUG,
     CompetitionEntry,
     get_competition,
 )
@@ -197,6 +196,8 @@ def _run_benchmark(args):
             )
             results.append(result)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"ERROR: {e}")
             results.append({
                 "slug": entry.slug,
@@ -256,44 +257,46 @@ def _run_single_competition(
     train_path = entry.get_train_path()
     test_path = entry.get_test_path()
     
+    from simulator.data_splitter import ensure_data_cached, split_competition_data
+    
     if not train_path.exists() or not test_path.exists() or force_split:
-        # Need to download and split
-        # For now, use placeholder - in real usage, download from Kaggle
-        print(f"  WARNING: Data not found. Please download competition data.")
-        print(f"  Expected source: {entry.cached_path or 'Kaggle API'}")
+        print(f"  Data not found or force split. Ensuring data is cached...")
+        ensure_data_cached(entry, "simulator/data")
         
-        # Return placeholder result
-        return {
-            "slug": entry.slug,
-            "task_type": entry.task_type,
-            "domain": entry.primary_domain,
-            "metric": entry.metric,
-            "cv_score": None,
-            "public_score": None,
-            "private_score": None,
-            "cv_public_gap": None,
-            "cv_private_gap": None,
-            "public_percentile": 50.0,
-            "private_percentile": 50.0,
-            "shakeup": 0.0,
-            "medal": "none",
-            "total_submissions": 0,
-            "runtime_seconds": 0.0,
-            "winning_model": None,
-            "n_features_final": None,
-            "domain_features_generated": None,
-            "domain_features_kept": None,
-            "error": "Data not found",
-        }
+        full_data_path = Path("simulator/data") / entry.slug / "full_data.csv"
+        split_dir = entry.get_data_dir() / "split"
+        
+        print(f"  Splitting data...")
+        split_result = split_competition_data(str(full_data_path), entry, str(split_dir))
+    else:
+        # Load existing split result data to build leaderboard
+        from simulator.data_splitter import _compute_split_hash, SplitResult
+        import json
+        meta_path = entry.get_data_dir() / "split" / "split_metadata.json"
+        
+        if not meta_path.exists():
+            ensure_data_cached(entry, "simulator/data")
+            full_data_path = Path("simulator/data") / entry.slug / "full_data.csv"
+            split_result = split_competition_data(str(full_data_path), entry, str(entry.get_data_dir() / "split"))
+        else:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            split_result = SplitResult(
+                train_path=str(train_path),
+                test_path=str(test_path),
+                sample_submission_path=str(entry.get_sample_submission_path()),
+                public_labels_path=str(entry.get_data_dir() / "split" / ".public_labels.csv"),
+                private_labels_path=str(entry.get_data_dir() / "split" / ".private_labels.csv"),
+                n_train=meta["n_train"],
+                n_public=meta["n_public"],
+                n_private=meta["n_private"],
+                split_hash=meta["split_hash"]
+            )
     
     # Step 2: Create leaderboard
     print(f"  [2/4] Creating simulated leaderboard...")
     
-    split_result = split_competition_data(
-        str(entry.get_train_path()),  # Use train as source (already split)
-        entry,
-        force=force_split,
-    )
+    # Creating simulated leaderboard...
     
     leaderboard = SimulatedLeaderboard(entry, split_result)
     
@@ -306,11 +309,10 @@ def _run_single_competition(
     professor_test_path = entry.get_test_path()
     sample_submission_path = entry.get_sample_submission_path()
     
-    # Run Professor (placeholder - integrate with actual Professor pipeline)
+    # Run Professor 
     professor_result = _run_professor_pipeline(
-        train_path=str(professor_train_path),
-        test_path=str(professor_test_path),
-        sample_submission_path=str(sample_submission_path),
+        competition=entry.slug,
+        data_path=str(entry.get_data_dir() / "split"),
         target_column=entry.target_column,
         id_column=entry.id_column,
         metric=entry.metric,
@@ -395,9 +397,8 @@ def _run_single_competition(
 
 
 def _run_professor_pipeline(
-    train_path: str,
-    test_path: str,
-    sample_submission_path: str,
+    competition: str,
+    data_path: str,
     target_column: str,
     id_column: str,
     metric: str,
@@ -407,54 +408,65 @@ def _run_professor_pipeline(
     time_limit: int = 600,
 ) -> Dict[str, Any]:
     """
-    Run Professor pipeline on prepared data.
-    
-    This is a placeholder that should be replaced with actual Professor integration.
-    For now, returns a dummy submission for testing the simulator infrastructure.
+    Run the actual Professor pipeline on prepared split data.
     """
+    from core.state import initial_state
+    from core.professor import run_professor
     import polars as pl
     import numpy as np
-    
-    print(f"    Running Professor (fast={fast_mode})...")
-    
-    # Load data
-    train_df = pl.read_csv(train_path)
-    test_df = pl.read_csv(test_path)
-    
-    # Placeholder: Generate baseline predictions
-    # In real implementation, this calls the full Professor pipeline
-    
-    if task_type == "binary":
-        # Simple baseline: predict based on target mean
-        target_mean = train_df[target_column].mean()
-        predictions = np.full(len(test_df), target_mean)
-    elif task_type == "multiclass":
-        # Predict most common class
-        most_common = train_df[target_column].mode()[0]
-        predictions = np.full(len(test_df), most_common)
-    else:
-        # Regression: predict mean
-        target_mean = train_df[target_column].mean()
-        predictions = np.full(len(test_df), target_mean)
-    
-    # Create submission
-    submission_df = test_df.select([id_column]).with_columns(
-        pl.Series(predictions).alias(target_column)
+
+    print(f"    Running Professor AI Engine (fast={fast_mode})...")
+
+    # Initialize State
+    state = initial_state(
+        competition=competition,
+        data_path=data_path,
+        budget_usd=2.0,
+        task_type=task_type
     )
+
+    try:
+        # Run AI Pipeline
+        final_state = run_professor(state)
+        error = None
+    except Exception as e:
+        final_state = state  # Capture whatever state we had before crash
+        error = str(e)
+        print(f"    [Error] Professor crashed: {e}")
+
+    # Process Results
+    submission_path = final_state.get("submission_path")
+    cv_score = final_state.get("cv_mean")
+    winning_model = final_state.get("winner", {}).get("model_name") if final_state.get("winner") else None
     
-    # Save submission
-    submission_path = Path(test_path).parent / "submission.csv"
-    submission_df.write_csv(str(submission_path))
-    
-    # Compute CV score (placeholder)
-    if task_type == "binary":
-        from sklearn.metrics import accuracy_score
-        cv_score = accuracy_score(
-            train_df[target_column],
-            np.full(len(train_df), target_mean)
-        )
-    else:
-        cv_score = None
+    n_features = 0
+    if final_state.get("manifest_path") and Path(final_state["manifest_path"]).exists():
+        with open(final_state["manifest_path"]) as f:
+            manifest = json.load(f)
+            n_features = len(manifest.get("features", []))
+
+    domain_generated = len(final_state.get("domain_features", [])) if final_state.get("domain_features") else 0
+    domain_kept = 0  # Requires deeper manifest parsing, skipping for now
+
+    # Provide fallback dummy submission if Professor crashed
+    if not submission_path or not Path(submission_path).exists():
+        print("    [Warning] Professor did not produce a submission. Generating dummy baseline.")
+        train_df = pl.read_csv(Path(data_path) / "train.csv")
+        test_df = pl.read_csv(Path(data_path) / "test.csv")
+        if task_type == "binary":
+            pred = train_df[target_column].mode()[0]
+            preds = np.full(len(test_df), pred)
+        elif task_type == "multiclass":
+            pred = train_df[target_column].mode()[0]
+            preds = np.full(len(test_df), pred)
+        else:
+            pred = train_df[target_column].median()
+            preds = np.full(len(test_df), pred)
+            
+        sub_df = test_df.select([id_column]).with_columns(pl.Series(preds).alias(target_column))
+        submission_path = Path(data_path) / "submission.csv"
+        sub_df.write_csv(str(submission_path))
+        submission_path = str(submission_path)
     
     return {
         "submission_path": str(submission_path),

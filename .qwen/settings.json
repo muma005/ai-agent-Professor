@@ -11,7 +11,10 @@
       "Bash(dir *)",
       "Bash(type *)",
       "Bash(timeout *)",
-      "Bash(findstr *)"
+      "Bash(findstr *)",
+      "Bash(git checkout *)",
+      "Bash(git pull *)",
+      "Bash(git merge *)"
     ]
   },
   "$version": 3

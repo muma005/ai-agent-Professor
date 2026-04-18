@@ -9,6 +9,7 @@
 # -------------------------------------------------------------------------
 
 import gc
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -366,6 +367,64 @@ def run_pseudo_label_agent(state: ProfessorState) -> ProfessorState:
     total_pseudo_added = 0
     cv_improvements = []
     halt_reason = ""
+
+    # ── Lightning Offload Hook ─────────────────────────────────────────
+    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
+    USE_LIGHTNING_PL = (
+        is_lightning_configured() and
+        os.getenv("LIGHTNING_OFFLOAD_PSEUDO_LABEL", "0") == "1"
+    )
+    
+    if USE_LIGHTNING_PL:
+        logger.info("[pseudo_label] ⚡ Offloading pseudo labeling to Lightning AI...")
+        output_dir = f"outputs/{session_id}"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Write model registry for the cloud script
+        registry_tmp = os.path.join(output_dir, "model_registry.json")
+        with open(registry_tmp, "w") as f:
+            json.dump(state.get("model_registry", []), f)
+        
+        files_to_sync = {
+            train_path: "train.csv",
+            test_path: "test.csv",
+            registry_tmp: "model_registry.json",
+        }
+        
+        synced = sync_files_to_lightning(session_id=session_id, files=files_to_sync)
+        if synced:
+            machine = os.getenv("LIGHTNING_PSEUDO_LABEL_MACHINE", "CPU")
+            task_type = "binary" if metric in ("auc", "logloss", "binary", "log_loss") else "regression"
+            res = run_on_lightning(
+                script="tools/lightning_jobs/run_pseudo_label.py",
+                args={"session_id": session_id, "target_col": target_col, "task_type": task_type},
+                job_name=f"pseudo_label_{session_id}",
+                machine=machine,
+                interruptible=True,
+                result_path=f"{output_dir}/pseudo_label_result.json",
+            )
+            if res["success"] and res["result"].get("success"):
+                lightning_data = res["result"]
+                state["lightning_pseudo_label_link"] = res["job_link"]
+                state["lightning_pseudo_label_runtime"] = res["runtime_s"]
+                
+                return {
+                    **state,
+                    "pseudo_labels_applied": lightning_data.get("pseudo_labels_applied", False),
+                    "pseudo_label_skip_reason": "",
+                    "pseudo_label_iterations": lightning_data.get("iterations_completed", 0),
+                    "pseudo_label_n_added": lightning_data.get("n_labels_added", 0),
+                    "pseudo_label_cv_improvement": sum(lightning_data.get("cv_improvements", [])),
+                    "pseudo_label_confidence_mean": 0.0,
+                    "pseudo_label_confidence_std": 0.0,
+                    "pseudo_label_critic_accepted": lightning_data.get("pseudo_labels_applied", False),
+                    "clean_train_with_pseudo_path": "",
+                    "pseudo_label_halt_reason": lightning_data.get("halt_reason", ""),
+                }
+            else:
+                logger.warning(f"[pseudo_label] Lightning failed: {res.get('error')}. Running locally.")
+        else:
+            logger.warning("[pseudo_label] File sync to Lightning failed. Running locally.")
 
     # ── Main iteration loop ──────────────────────────────────────
     for iteration in range(1, MAX_ITERATIONS + 1):

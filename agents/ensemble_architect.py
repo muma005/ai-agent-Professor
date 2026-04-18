@@ -456,6 +456,59 @@ def run_ensemble_architect(state: ProfessorState) -> dict:
     cv_scores = [float(registry[name].get("cv_mean", 0.0)) for name in selected_names]
 
     # ── Step 5: Optuna weight optimisation ────────────────────────
+    # ── Lightning Offload Hook ─────────────────────────────────────────
+    import os, json
+    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
+    USE_LIGHTNING_ENS = (
+        is_lightning_configured() and
+        os.getenv("LIGHTNING_OFFLOAD_ENSEMBLE", "0") == "1"
+    )
+    
+    if USE_LIGHTNING_ENS and len(selected_names) > 1:
+        logger.info("[ensemble_architect] ⚡ Offloading ensemble meta-learner to Lightning AI...")
+        output_dir = f"outputs/{session_id}"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        oof_path_tmp = os.path.join(output_dir, "oof_stack.npy")
+        y_path_tmp = os.path.join(output_dir, "y_train.npy")
+        models_path_tmp = os.path.join(output_dir, "selected_models.json")
+        
+        np.save(oof_path_tmp, oof_stack_full)
+        np.save(y_path_tmp, y_train)
+        with open(models_path_tmp, "w") as f:
+            json.dump(selected_names, f)
+        
+        synced = sync_files_to_lightning(
+            session_id=session_id,
+            files={
+                oof_path_tmp: "oof_stack.npy",
+                y_path_tmp: "y_train.npy",
+                models_path_tmp: "selected_models.json",
+            }
+        )
+        if synced:
+            machine = os.getenv("LIGHTNING_ENSEMBLE_MACHINE", "CPU")
+            res = run_on_lightning(
+                script="tools/lightning_jobs/run_ensemble_metalearner.py",
+                args={"session_id": session_id, "task_type": task_type},
+                job_name=f"ensemble_{session_id}",
+                machine=machine,
+                interruptible=True,
+                result_path=f"{output_dir}/ensemble_metalearner_result.json",
+            )
+            if res["success"] and res["result"].get("success"):
+                lightning_data = res["result"]
+                state["lightning_ensemble_link"] = res["job_link"]
+                state["lightning_ensemble_runtime"] = res["runtime_s"]
+                logger.info(f"[ensemble_architect] Lightning returned meta CV {lightning_data.get('meta_cv_score', 'N/A')}")
+                # Continue with local Optuna anyway — Lightning result is supplementary
+                USE_LIGHTNING_ENS = False  # Fall through to local
+            else:
+                logger.warning(f"[ensemble_architect] Lightning failed: {res.get('error')}. Running locally.")
+                USE_LIGHTNING_ENS = False
+        else:
+            USE_LIGHTNING_ENS = False
+
     if len(selected_names) > 1:
         optimal_weights, opt_score = _run_weight_optimisation(
             oof_stack_opt, y_opt,

@@ -16,7 +16,7 @@ LINEAR_ROUTE_V0 = [
     "feature_factory",
     "ml_optimizer",
     "red_team_critic",
-    "submit",
+    "submission_strategist",
 ]
 
 

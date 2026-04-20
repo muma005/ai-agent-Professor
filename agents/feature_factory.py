@@ -192,11 +192,13 @@ Return a JSON array of feature candidates:
 ]
 
 CRITICAL: The "expression" field MUST be a valid Polars Python expression string that can be evaluated with eval().
+CRITICAL: For binning (qcut/cut), you MUST use labels=False to ensure integer indices are returned, not string intervals.
 Examples of VALID expressions:
 - "pl.col('feature_0') / (pl.col('feature_1') + 1)"
 - "(pl.col('feature_0') + pl.col('feature_1')) / 2"
 - "pl.col('feature_0') * pl.col('feature_1')"
 - "(pl.col('feature_0').cast(pl.Float64) + 1.0).log()"
+- "pl.col('feature_0').qcut(5, labels=False).cast(pl.Int32)"  # CORRECT BINNING
 
 Examples of INVALID expressions (DO NOT USE):
 - "feature_0 divided by feature_1" (natural language, not code)
@@ -211,6 +213,19 @@ Rules:
 - Do NOT suggest lag features for non-time-series competitions.
 - expression MUST be a valid Polars expression string, not natural language.
 """
+
+
+def _safe_json_loads(text: str) -> any:
+    """Robust JSON loader that handles common LLM formatting errors."""
+    import re
+    # 1. Strip markdown code blocks
+    text = re.sub(r"```json\s*", "", text)
+    text = re.sub(r"```\s*", "", text)
+    # 2. Strip trailing commas before closing braces/brackets
+    text = re.sub(r",\s*([\]}])", r"\1", text)
+    # 3. Strip non-printable chars
+    text = text.strip()
+    return json.loads(text)
 
 
 def _extract_json(text: str) -> str:
@@ -935,6 +950,16 @@ def _rewrite_llm_expression(expr_str: str, allowed_cols: set[str]) -> str:
                     keywords=[]
                 )
             return node
+
+        def visit_Call(self, node):
+            # Intercept qcut/cut calls and inject labels=False
+            self.generic_visit(node)
+            if isinstance(node.func, ast.Attribute) and node.func.attr in ("qcut", "cut"):
+                # Check if labels is already in keywords
+                if not any(kw.arg == "labels" for kw in node.keywords):
+                    node.keywords.append(ast.keyword(arg="labels", value=ast.Constant(value=False)))
+            return node
+
     try:
         tree = ast.parse(expr_str, mode="eval")
     except SyntaxError:
@@ -1216,6 +1241,20 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
     schema_names = [c["name"] for c in schema.get("columns", []) if not c.get("is_id") and not c.get("is_target")]
     round5b_candidates = _generate_round5_interaction_features(schema, competition_brief, top_features_by_importance=schema_names[:50])
     
+    # ── Holographic Fast-Track: Candidate Capping ──────────────────────────────
+    from core.config import ProfessorConfig
+    config = state.get("config", ProfessorConfig.from_env())
+    
+    cand_cap = config.get_cap("feature_candidates", 9999)
+    if config.fast_mode:
+        round1_candidates = round1_candidates[:cand_cap]
+        round2_candidates = round2_candidates[:cand_cap]
+        round3_candidates = round3_candidates[:cand_cap]
+        round4_candidates = round4_candidates[:cand_cap]
+        round5a_candidates = round5a_candidates[:cand_cap]
+        round5b_candidates = round5b_candidates[:cand_cap]
+        logger.info(f"[FeatureFactory] [FastTrack] Capped all rounds to {cand_cap} candidates each.")
+
     all_candidates = round1_candidates + round2_candidates + round3_candidates + round4_candidates + round5a_candidates + round5b_candidates
     
     # AST Pipeline (Rounds 1, 2, 5)

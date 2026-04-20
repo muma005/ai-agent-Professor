@@ -28,6 +28,14 @@ MAX_ATTEMPTS = 3
 
 _SEVERITY_ORDER = {"OK": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 
+# ── Holographic Fast-Track Safe DTypes ──────────────────────────────────
+# Consolidate safe types for sklearn models to prevent "could not convert string to float"
+CRITIC_SAFE_DTYPES = (
+    pl.Float32, pl.Float64, 
+    pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+    pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, 
+    pl.Boolean
+)
 
 # =========================================================================
 # VECTOR 1A — Shuffled Target Test
@@ -41,19 +49,14 @@ def _check_shuffled_target(
     """
     Trains a simple model on shuffled targets.
     If AUC is meaningfully above 0.5, leakage is present.
-
-    Also checks direct feature-target correlation for Boolean/categorical features
-    that would be missed by the model-based test on small datasets.
     """
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
     from sklearn.model_selection import cross_val_score
 
     y_shuffled = y_train.sample(fraction=1.0, shuffle=True, seed=42).to_numpy()
 
-    # Select only numeric columns (including Boolean for leakage detection)
-    numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
-                      pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, pl.Boolean)
-    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in numeric_dtypes]
+    # Select only numeric columns using consolidated safe dtypes
+    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in CRITIC_SAFE_DTYPES]
     if not numeric_cols:
         return {"verdict": "OK", "auc_shuffled": None, "note": "No numeric features to test"}
 
@@ -223,11 +226,11 @@ def _check_adversarial_classifier(
     if test_df is None or len(test_df) == 0:
         return {"verdict": "OK", "note": "No test data available for adversarial check"}
 
-    numeric_dtypes = (pl.Float32, pl.Float64, pl.Int32, pl.Int64, pl.UInt32, pl.UInt64)
+    # Use consolidated safe dtypes
     numeric_cols = [
         c for c in train_df.columns
         if c != target_col
-        and train_df[c].dtype in numeric_dtypes
+        and train_df[c].dtype in CRITIC_SAFE_DTYPES
     ]
     if not numeric_cols:
         return {"verdict": "OK", "note": "No shared numeric columns for adversarial test"}
@@ -447,7 +450,7 @@ def _check_temporal_leakage(
     numeric_cols = [
         c for c in df.columns
         if c != target_col
-        and df[c].dtype in (pl.Float32, pl.Float64, pl.Int32, pl.Int64)
+        and df[c].dtype in CRITIC_SAFE_DTYPES
     ]
 
     for col in numeric_cols[:50]:
@@ -504,7 +507,7 @@ def _noise_injection_check(
 
     numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
                       pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
-    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in numeric_dtypes]
+    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in CRITIC_SAFE_DTYPES]
     if not numeric_cols:
         return {"verdict": "OK", "note": "No numeric features for noise injection"}
 
@@ -601,7 +604,7 @@ def _slice_performance_check(
 
     numeric_dtypes = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
                       pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
-    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in numeric_dtypes]
+    numeric_cols = [c for c in X_train.columns if X_train[c].dtype in CRITIC_SAFE_DTYPES]
     if not numeric_cols:
         return {"verdict": "OK", "note": "No numeric features for slice audit"}
 
@@ -959,12 +962,14 @@ def _overall_severity(findings: list) -> str:
 @timed_node
 def run_red_team_critic(state: ProfessorState) -> ProfessorState:
     """LangGraph node -- inner retry loop."""
-    # P4.5 FIX: Check config - skip if in fast mode
+    # Holographic Fast-Track: Logic stays, resolution drops
     from core.config import ProfessorConfig
     config = state.get("config", ProfessorConfig.from_env())
     
-    if config.agents.skip_red_team_critic:
-        print("[RedTeamCritic] Skipping (fast mode)")
+    # We only skip if the agent is explicitly disabled in the skip config,
+    # NOT based on fast_mode which now runs all agents at low res.
+    if getattr(config.agents, "skip_red_team_critic", False):
+        print("[RedTeamCritic] Explicitly skipped via config.")
         state["critic_severity"] = "OK"
         state["critic_verdict"] = None
         state["critic_verdict_path"] = None
@@ -1137,7 +1142,7 @@ def _run_core_logic(state: ProfessorState, attempt: int) -> ProfessorState:
     _run_vector("id_only_model",         _check_id_only_model(df, target_col, target_type, schema))
     
     if not USE_LIGHTNING_CRITIC:
-        _run_vector("adversarial_classifier", _check_adversarial_classifier(df, test_df or pl.DataFrame(), target_col))
+        _run_vector("adversarial_classifier", _check_adversarial_classifier(df, test_df if test_df is not None else pl.DataFrame(), target_col))
     
     _run_vector("preprocessing_audit",   _check_preprocessing_leakage(de_code))
 

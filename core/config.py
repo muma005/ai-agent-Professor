@@ -124,28 +124,27 @@ class ProfessorConfig:
     
     Presets:
         fast_mode=True       → Local development, ~5 min/trial
-            - Disables sandbox
-            - Skips CompetitionIntel, EDA, RedTeamCritic
-            - Skips LLM feature rounds
-            - 1 Optuna trial (defaults only)
-            - Single model (LightGBM)
-            - 3-fold CV
+            - ALL agents enabled (Holographic Fast-Track)
+            - 1,000 row data cap
+            - 3 Optuna trials (LGBM only)
+            - 5 Feature candidates
+            - 2-fold CV (fallback mode)
         
         production_mode=True → Full execution, ~1 hour/trial
-            - Full sandbox isolation
-            - All agents enabled
+            - Full data processing
             - 100 Optuna trials
             - 3 models (LGBM, XGB, CatBoost)
             - 5-fold CV
-    
-    Example:
-        config = ProfessorConfig(fast_mode=True)
-        state = config.apply_to_state(initial_state)
-        result = run_professor(state)
     """
     # Execution mode presets
     fast_mode: bool = False
     production_mode: bool = False
+    
+    # Fast Track Caps
+    row_cap: int = 1000
+    candidate_cap: int = 5
+    trial_cap: int = 3
+    fold_cap: int = 2
     
     # Component configs
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
@@ -165,27 +164,67 @@ class ProfessorConfig:
         elif self.production_mode:
             self._apply_production_mode()
     
+    def get_cap(self, key: str, full_value: any) -> any:
+        """
+        Resolution-capping helper for Holographic Fast-Track.
+        Returns capped value if fast_mode=True, else original.
+        """
+        if not self.fast_mode:
+            return full_value
+            
+        caps = {
+            "row_count":         self.row_cap,
+            "optuna_trials":      self.trial_cap,
+            "feature_candidates": self.candidate_cap,
+            "cv_folds":           self.fold_cap,
+            "stability_seeds":    1,
+            "pseudo_label_iters": 1,
+            "null_importance_permutations": 1,
+            "critic_audit_trials": 1
+        }
+        
+        if key in caps:
+            # For lists, slice them
+            if isinstance(full_value, list):
+                return full_value[:1] if key == "models_to_try" else full_value
+            # For numbers, return min
+            return min(full_value, caps[key])
+            
+        return full_value
+
     def _apply_fast_mode(self):
-        """Configure for fast local execution"""
-        # Disable sandbox overhead
+        """Configure for Holographic Fast-Track execution (All agents active, low resolution)"""
+        # ── FORCE LOCAL EXECUTION ──
+        import os
+        lightning_flags = [
+            "LIGHTNING_OFFLOAD_OPTUNA", "LIGHTNING_OFFLOAD_NULL_IMPORTANCE",
+            "LIGHTNING_OFFLOAD_EDA", "LIGHTNING_OFFLOAD_FEATURE_TESTING",
+            "LIGHTNING_OFFLOAD_STABILITY", "LIGHTNING_OFFLOAD_CRITIC",
+            "LIGHTNING_OFFLOAD_PSEUDO_LABEL", "LIGHTNING_OFFLOAD_ENSEMBLE"
+        ]
+        for flag in lightning_flags:
+            os.environ[flag] = "0"
+
+        # Disable sandbox overhead for speed, but keep logic
         self.sandbox.enabled = False
         self.sandbox.skip_import_validation = True
         
-        # Skip expensive feature generation
-        self.feature_factory.skip_llm_rounds = True
-        self.feature_factory.skip_wilcoxon_gate = True
-        self.feature_factory.skip_null_importance = True
+        # Enable all feature generation steps but cap them via get_cap later
+        self.feature_factory.skip_llm_rounds = False
+        self.feature_factory.skip_wilcoxon_gate = False
+        self.feature_factory.skip_null_importance = False
         
         # Minimal model optimization
-        self.ml_optimizer.optuna_trials = 1  # Just defaults
-        self.ml_optimizer.models_to_try = ["lgbm"]  # Single model
-        self.ml_optimizer.cv_folds = 3  # Reduced CV
+        self.ml_optimizer.optuna_trials = self.trial_cap
+        self.ml_optimizer.models_to_try = ["lgbm"] 
+        self.ml_optimizer.cv_folds = self.fold_cap
         
-        # Skip non-essential agents
-        self.agents.skip_competition_intel = True
-        self.agents.skip_eda = True
-        self.agents.skip_red_team_critic = True
-        self.agents.skip_ensemble = True
+        # ENABLE ALL AGENTS (No more skipping)
+        self.agents.skip_competition_intel = False
+        self.agents.skip_eda = False
+        self.agents.skip_red_team_critic = False
+        self.agents.skip_ensemble = False
+        self.agents.skip_pseudo_label = False
     
     def _apply_production_mode(self):
         """Configure for full production execution"""
@@ -226,11 +265,13 @@ class ProfessorConfig:
         """
         Apply config to ProfessorState.
         
-        Modifies DAG to skip agents based on config.
+        In Holographic Fast-Track, we keep ALL agents in the DAG but 
+        individual agents will use config.get_cap() to reduce work.
         """
         state["config"] = self
         
-        # Modify DAG based on config
+        # Modify DAG based on skip flags ONLY if they are explicitly True 
+        # (independent of fast_mode)
         if "dag" in state:
             dag = state["dag"].copy()
             
@@ -245,6 +286,9 @@ class ProfessorConfig:
             
             if self.agents.skip_ensemble:
                 dag = [n for n in dag if n != "ensemble_architect"]
+
+            if self.agents.skip_pseudo_label:
+                dag = [n for n in dag if n != "pseudo_label_agent"]
             
             state["dag"] = dag
         

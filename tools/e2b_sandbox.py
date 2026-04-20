@@ -90,7 +90,7 @@ SANDBOX_TIMEOUT_S = 600  # 10 minutes
 
 # ── Safe environment for subprocess sandbox (strips API keys) ────
 _ENV_WHITELIST = {
-    "PATH", "PYTHONPATH", "PYTHONHOME", "HOME", "USERPROFILE",
+    "PATH", "PYTHONPATH", "PYTHONHOME", "HOME", "USERPROFILE", "APPDATA",
     "SYSTEMROOT", "TEMP", "TMP", "VIRTUAL_ENV", "CONDA_PREFIX",
     "LANG", "LC_ALL",
 }

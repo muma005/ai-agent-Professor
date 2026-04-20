@@ -272,7 +272,7 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
     preprocessor_path = f"{output_dir}/preprocessor.pkl"
     preprocessor_config_path = f"{output_dir}/preprocessor_config.json"
 
-    df_clean.write_parquet(parquet_path)
+    df_clean.write_parquet(parquet_path, use_pyarrow=True)
     preprocessor.save(preprocessor_path)
     
     # LEAKAGE FIX: Save preprocessor config separately for CV-safe reconstruction

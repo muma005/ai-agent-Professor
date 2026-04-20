@@ -169,9 +169,9 @@ def _run_ewma_monitor(state: ProfessorState, submission_log: list) -> dict:
 def _select_submission_pair(state: ProfessorState) -> tuple:
     """
     Select Submission A (best stability_score) and Submission B
-    (lowest correlation with A's OOF).
+    (lowest correlation with A's test predictions).
 
-    Returns (a_name, a_oof, b_name, b_oof, corr_ab).
+    Returns (a_name, a_preds, b_name, b_preds, corr_ab).
     """
     registry_raw = state.get("model_registry", [])
 
@@ -187,40 +187,39 @@ def _select_submission_pair(state: ProfessorState) -> tuple:
         raise ValueError(f"model_registry has unexpected type: {type(registry_raw)}")
 
     if not registry:
-        raise ValueError("model_registry is empty — cannot select submissions.")
+        raise ValueError("model_registry is empty â€” cannot select submissions.")
 
     # Submission A: highest stability_score
     a_name = max(registry.keys(), key=lambda n: registry[n].get("stability_score", 0.0))
 
-    # If ensemble accepted, use ensemble OOF for A's predictions
-    ensemble_accepted = state.get("ensemble_accepted", False)
-    if ensemble_accepted:
-        a_oof = np.array(state.get("ensemble_oof", []), dtype=float)
-        if len(a_oof) == 0:
-            a_oof = np.array(registry[a_name].get("oof_predictions", []), dtype=float)
-    else:
-        a_oof = np.array(registry[a_name].get("oof_predictions", []), dtype=float)
+    # FIX: Use test_predictions for submission, not OOF
+    a_preds = np.array(registry[a_name].get("test_predictions", []), dtype=float)
+    if len(a_preds) == 0:
+         # Fallback to OOF if test_predictions are missing (will still fail shape check if height differs)
+         a_preds = np.array(registry[a_name].get("oof_predictions", []), dtype=float)
 
     # Submission B: lowest correlation with A
+    from scipy.stats import pearsonr
     if len(registry) == 1:
-        # Only one model — use it for both
+        # Only one model â€” use it for both
         b_name = a_name
-        b_oof = a_oof
+        b_preds = a_preds
         corr_ab = 1.0
     else:
         b_name = None
+        b_preds = None
         b_corr = 2.0  # start high
         for name, entry in registry.items():
             if name == a_name:
                 continue
-            oof = np.array(entry.get("oof_predictions", []), dtype=float)
-            if len(oof) != len(a_oof):
+            p_test = np.array(entry.get("test_predictions", []), dtype=float)
+            if len(p_test) != len(a_preds) or len(p_test) == 0:
                 continue
-            corr, _ = pearsonr(a_oof, oof)
+            corr, _ = pearsonr(a_preds, p_test)
             if corr < b_corr:
                 b_corr = corr
                 b_name = name
-                b_oof = oof
+                b_preds = p_test
 
         if b_name is None:
             # Fallback: use second best stability
@@ -228,12 +227,18 @@ def _select_submission_pair(state: ProfessorState) -> tuple:
                                   key=lambda n: registry[n].get("stability_score", 0.0),
                                   reverse=True)
             b_name = sorted_names[1] if len(sorted_names) > 1 else sorted_names[0]
-            b_oof = np.array(registry[b_name].get("oof_predictions", []), dtype=float)
-            corr_ab, _ = pearsonr(a_oof, b_oof)
+            b_preds = np.array(registry[b_name].get("test_predictions", []), dtype=float)
+            if len(b_preds) == 0:
+                b_preds = np.array(registry[b_name].get("oof_predictions", []), dtype=float)
+            
+            if len(a_preds) == len(b_preds) and len(a_preds) > 0:
+                corr_ab, _ = pearsonr(a_preds, b_preds)
+            else:
+                corr_ab = 1.0
         else:
             corr_ab = b_corr
 
-    return a_name, a_oof, b_name, b_oof, float(corr_ab)
+    return a_name, a_preds, b_name, b_preds, float(corr_ab)
 
 
 # ── Submission format validation ──────────────────────────────────

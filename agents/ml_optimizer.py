@@ -1280,6 +1280,10 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     session_id  = state["session_id"]
     output_dir  = f"outputs/{session_id}"
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Initialize variables for return state
+    feature_data_path_test = None
+    test_preds = []
 
     print(f"[MLOptimizer] Starting — session: {session_id}")
     print(f"[MLOptimizer] Config: {n_trials} trials, models={models_to_try}, cv_folds={cv_folds}")
@@ -1376,9 +1380,12 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     # ── Phase 1: Optuna study ─────────────────────────────────────
     direction = _get_study_direction(metric)
     # P4.4 FIX: Use config n_trials instead of hardcoded N_OPTUNA_TRIALS
-    # Dynamic scaling for tiny datasets: 3 trials per 100 rows, but respect config minimum
-    n_trials_dynamic = max(3, int(len(y) * 0.03))
-    n_trials = max(n_trials, n_trials_dynamic)  # Use config value as minimum
+    # Dynamic scaling for tiny datasets: 3 trials per 100 rows.
+    # BUG FIX: Only apply dynamic scaling if n_trials is at its default or higher.
+    # If the user explicitly asks for 1 (e.g. for testing), respect it.
+    if n_trials > 5: 
+        n_trials_dynamic = max(3, int(len(y) * 0.03))
+        n_trials = max(n_trials, n_trials_dynamic)
 
     # ── HPO Warm Start (GAP 11) ──────────────────────────────────
     hpo_seeds = get_hpo_warm_start_seeds(state)
@@ -1586,6 +1593,21 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     # OOF predictions
     oof_preds = _get_oof_predictions(X_train_cv_np, y_train_cv, best_config, task_type, contract)
 
+    # FINAL TEST PREDICTIONS (for submission)
+    test_preds = []
+    if feature_data_path_test and os.path.exists(feature_data_path_test):
+        try:
+            df_test_final = read_parquet(feature_data_path_test)
+            X_test_final = df_test_final.to_numpy().astype(np.float64)
+            if contract.requires_proba:
+                p_test = final_model.predict_proba(X_test_final)
+                test_preds = p_test[:, 1] if p_test.shape[1] == 2 else p_test
+            else:
+                test_preds = final_model.predict(X_test_final)
+            test_preds = test_preds.tolist()
+        except Exception as e:
+            logger.warning(f"[ml_optimizer] Failed to generate final test predictions: {e}")
+
     # ── FLAW-11.6: Overfitting Detection ──────────────────────────
     # Estimate train score using the best model's performance on training data
     # We use the mean of the training fold scores from Optuna trials as a proxy
@@ -1669,30 +1691,51 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
 
     # ── Process and save test data ─────────────────────────────────────────────
     feature_data_path_test = None
+    test_preds = []
     test_path = state.get("test_data_path", "")
+    
     if test_path and os.path.exists(test_path):
         try:
-            df_test = read_parquet(test_path)
+            # BUG FIX: test_path is usually test.csv, we must read it as CSV first
+            if test_path.endswith(".csv"):
+                df_test_raw = pl.read_csv(test_path, infer_schema_length=10000)
+            else:
+                df_test_raw = read_parquet(test_path)
             
             # Apply same preprocessor
             preprocessor_path = state.get("preprocessor_path", "")
             if os.path.exists(preprocessor_path):
                 from core.preprocessor import TabularPreprocessor
                 preprocessor = TabularPreprocessor.load(preprocessor_path)
-                X_test = preprocessor.transform(df_test)
+                X_test_pl = preprocessor.transform(df_test_raw)
                 
                 # Select only the features used in training (feature_order)
                 if feature_order:
-                    available_cols = [c for c in feature_order if c in X_test.columns]
+                    available_cols = [c for c in feature_order if c in X_test_pl.columns]
                     if available_cols:
-                        X_test = X_test.select(available_cols)
+                        X_test_pl = X_test_pl.select(available_cols)
+                
+                # Convert to numpy for prediction
+                X_test_np = X_test_pl.to_numpy().astype(np.float64)
                 
                 # Save test features
                 feature_data_path_test = f"{output_dir}/X_test.parquet"
-                X_test.write_parquet(feature_data_path_test)
+                X_test_pl.write_parquet(feature_data_path_test, use_pyarrow=True)
                 logger.info(f"[ml_optimizer] Saved test features: {feature_data_path_test}")
+
+                # Generate predictions
+                if contract.requires_proba:
+                    p_test = final_model.predict_proba(X_test_np)
+                    test_preds = p_test[:, 1] if p_test.shape[1] == 2 else p_test
+                else:
+                    test_preds = final_model.predict(X_test_np)
+                test_preds = [float(p) for p in test_preds]
+                logger.info(f"[ml_optimizer] Generated {len(test_preds)} test predictions")
+
         except Exception as e:
             logger.warning(f"[ml_optimizer] Could not process test data: {e}")
+            import traceback
+            logger.warning(traceback.format_exc())
 
     # ── Build registry entry ──────────────────────────────────────
     model_id = f"{best_model_type}_day19_{int(time.time())}"
@@ -1707,6 +1750,7 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
         "seed_results":          best_stability.seed_results,
         "params":                best_config,
         "oof_predictions_path":  oof_path,
+        "test_predictions":      test_preds, # persist for strategist
         "data_hash":             state.get("data_hash", ""),
         "scorer_name":           contract.scorer_name,
         # FLAW-11.6: Overfitting detection results

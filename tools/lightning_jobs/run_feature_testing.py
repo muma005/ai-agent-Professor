@@ -65,9 +65,12 @@ def main():
             else:
                 # It's an AST expression string, need to eval
                 try:
-                    # In polars context, we can generally eval the string 
-                    # but we must provide pl to eval
-                    expr_obj = eval(expr_str, {"pl": pl})
+                    # Polars str(expr) looks like "[(col(\"A\")) + (col(\"B\"))]"
+                    # We need to provide 'col' to eval for it to work.
+                    eval_globals = {"pl": pl, "col": pl.col}
+                    # Strip the outer brackets [] if they exist
+                    clean_expr = expr_str.strip("[]")
+                    expr_obj = eval(clean_expr, eval_globals)
                     df = df.with_columns(expr_obj.alias(name))
                     generated_features.append(name)
                 except Exception as e:

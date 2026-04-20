@@ -101,9 +101,11 @@ def run_on_lightning(
         machine_obj  = MACHINE_MAP.get(machine, Machine.CPU_SMALL)
         studio_name  = os.environ["LIGHTNING_STUDIO_NAME"]
         teamspace    = os.getenv("LIGHTNING_TEAMSPACE") or None
+        org          = os.getenv("LIGHTNING_ORG") or None
+        user         = os.getenv("LIGHTNING_USER") or None
 
         logger.info(f"[lightning] Connecting to Studio: {studio_name}")
-        studio = Studio(name=studio_name, teamspace=teamspace)
+        studio = Studio(name=studio_name, teamspace=teamspace, org=org, user=user)
         studio.start()
 
         # Build command string
@@ -165,7 +167,7 @@ def run_on_lightning(
             try:
                 studio.download_file(
                     remote_path=f"/home/{args.get('session_id', 'unknown')}/{Path(result_path).name}",
-                    local_path=str(local_path),
+                    file_path=str(local_path),
                 )
             except Exception:
                 pass  # File may already be local if Studio is mounted
@@ -220,13 +222,15 @@ def sync_files_to_lightning(
         studio = Studio(
             name=os.environ["LIGHTNING_STUDIO_NAME"],
             teamspace=os.getenv("LIGHTNING_TEAMSPACE") or None,
+            org=os.getenv("LIGHTNING_ORG") or None,
         )
         studio.start()
 
         for local_path, remote_name in files.items():
             remote_path = f"/home/{session_id}/{remote_name}"
+            # Ensure the remote directory exists by using the correct SDK pattern
             studio.upload_file(
-                local_path=str(local_path),
+                file_path=str(local_path),
                 remote_path=remote_path,
             )
             logger.info(f"[lightning] Uploaded: {local_path} → {remote_path}")

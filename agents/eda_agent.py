@@ -2,14 +2,19 @@
 
 import os
 import json
+import logging
 import polars as pl
-from typing import Dict, Any, List, Optional
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 from core.state import ProfessorState
 from tools.data_tools import read_parquet, read_json
 from core.lineage import log_event
 from guards.agent_retry import with_agent_retry
 from tools.performance_monitor import timed_node
 
+logger = logging.getLogger(__name__)
+
+AGENT_NAME = "eda_agent"
 
 # ── Vector 1: Target distribution profiling ──────────────────────
 
@@ -194,7 +199,7 @@ def _detect_collinearity(df: pl.DataFrame, target_col: str, threshold: float = 0
 
 # ── Vector 7: Leakage detection ──────────────────────────────────
 
-def _detect_leakage(df: pl.DataFrame, target_col: str) -> tuple[list, list]:
+def _detect_leakage(df: pl.DataFrame, target_col: str) -> Tuple[List[Dict], List[str]]:
     """Find features suspiciously correlated with target (>0.95)."""
     leakage = []
     drop_candidates = []
@@ -328,159 +333,82 @@ def _recommend_drops_from_missing(missing_profile: list, threshold: float = 0.5)
 # ── Main agent function ──────────────────────────────────────────
 
 @timed_node
-@with_agent_retry("EDAAgent")
+@with_agent_retry(AGENT_NAME)
 def run_eda_agent(state: ProfessorState) -> ProfessorState:
     """
     LangGraph node: EDA Agent — 12-vector comprehensive analysis.
-
-    READS from state (never re-detects):
-      - target_col: from data_engineer (schema authority)
-      - id_columns: from data_engineer (schema authority)
-
-    WRITES to state:
-      - eda_report: full analysis dict
-      - eda_report_path: path to eda_report.json
-      - dropped_features: authoritative list of features to exclude
     """
-    # P4.2 FIX: Check config - skip if in fast mode
-    from core.config import ProfessorConfig
-    config = state.get("config", ProfessorConfig.from_env())
+    # 1. Skip logic from config
+    config = state.get("config")
+    if config and config.agents.skip_eda:
+        logger.info(f"[{AGENT_NAME}] Skipping per config.")
+        return state
     
-    if config.agents.skip_eda:
-        print("[EDAAgent] Skipping (fast mode)")
-        
-        # Return fallback items so Integrity Gate doesn't crash
-        return {
-            "eda_report_path": "skipped",
-            "eda_report": {
-                "status": "skipped", 
-                "target_distribution": {"imbalance_ratio": 1.0}
-            },
-            "dropped_features": []
-        }
+    session_id = state.get("session_id", "default")
+    output_dir = Path(f"outputs/{session_id}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"[{AGENT_NAME}] Starting — session: {session_id}")
+
+    clean_path = state.get("clean_data_path", "")
+    if not clean_path or not os.path.exists(clean_path):
+        raise ValueError(f"[{AGENT_NAME}] clean_data_path missing or not valid: {clean_path}")
+
+    df = read_parquet(clean_path)
     
-    session_id = state["session_id"]
-    output_dir = f"outputs/{session_id}"
-    os.makedirs(output_dir, exist_ok=True)
-
-    print(f"[EDAAgent] Starting — session: {session_id}")
-
-    if not state.get("clean_data_path") or not os.path.exists(state["clean_data_path"]):
-        raise ValueError("[EDAAgent] clean_data_path missing or not valid.")
-
-    df = read_parquet(state["clean_data_path"])
-    schema = read_json(state["schema_path"]) if state.get("schema_path") else {}
-
-    # ── Read from SCHEMA AUTHORITY — never guess ──────────────────
+    # 2. Read from SCHEMA AUTHORITY
     target_col = state.get("target_col", "")
     id_columns = state.get("id_columns", [])
     if not target_col:
-        raise ValueError(
-            "[EDAAgent] target_col not set in state. "
-            "data_engineer must run first (schema authority)."
-        )
+        raise ValueError(f"[{AGENT_NAME}] target_col not set in state.")
 
-    print(f"[EDAAgent] target_col: '{target_col}' | id_columns: {id_columns}")
-
-    # ── Run all 12 analysis vectors ───────────────────────────────
+    # 3. Run all 12 analysis vectors (Local only for now, Lightning stubbed)
     target_dist    = _analyze_target(df, target_col)
     id_validation  = _validate_id_columns(df, id_columns, target_col)
     missing        = _analyze_missing(df, target_col)
     zero_var_drops = _detect_zero_variance(df, target_col)
     cardinality    = _analyze_cardinality(df, target_col)
-    
-    # ── Lightning Offload Hook ─────────────────────────────────────────
-    from tools.lightning_runner import is_lightning_configured, run_on_lightning, sync_files_to_lightning
-    USE_LIGHTNING = is_lightning_configured() and str(os.environ.get("LIGHTNING_OFFLOAD_EDA", "0")) == "1"
-    
-    if USE_LIGHTNING:
-        print("[EDAAgent] ⚡ Offloading EDA to Lightning AI...")
-        data_path = state["clean_data_path"]
-        if sync_files_to_lightning(session_id, {data_path: "train.csv"}):
-            machine = os.environ.get("LIGHTNING_EDA_MACHINE", "CPU")
-            res = run_on_lightning(
-                script="tools/lightning_jobs/run_eda.py",
-                args={"session_id": session_id, "target_col": target_col, "task_type": state.get("task_type", "binary")},
-                job_name=f"eda_{session_id}",
-                machine=machine,
-                interruptible=True,
-                result_path=f"{output_dir}/eda_result.json"
-            )
-            if res["success"] and res["result"].get("success"):
-                lightning_data = res["result"]
-                # Parse backwards to local format
-                collinear = []
-                for k, v in lightning_data.get("correlation_matrix", {}).items():
-                    a, b = k.split("_vs_")
-                    collinear.append({"feature_a": a, "feature_b": b, "spearman": v})
-                
-                # Mock leakage for now since lightning script uses MI and general drops
-                leakage = []
-                leak_drops = []
-                for f, mi in lightning_data.get("mutual_info_scores", {}).items():
-                    if mi > 0.5:
-                        leakage.append({"feature": f, "target_correlation": float(mi), "verdict": "FLAG"})
-                        leak_drops.append(f)
-                
-                state["lightning_eda_link"] = res["job_link"]
-                state["lightning_eda_runtime"] = res["runtime_s"]
-            else:
-                print(f"[EDAAgent] Lightning failed: {res.get('error')}. Running locally.")
-                USE_LIGHTNING = False
-        else:
-            USE_LIGHTNING = False
-
-    if not USE_LIGHTNING:
-        collinear      = _detect_collinearity(df, target_col)
-        leakage, leak_drops = _detect_leakage(df, target_col)
-        
+    collinear      = _detect_collinearity(df, target_col)
+    leakage, leak_drops = _detect_leakage(df, target_col)
     outliers       = _analyze_outliers(df)
     dupes          = _analyze_duplicates(df)
     temporal       = _analyze_temporal(df)
     mixed_types    = _detect_mixed_types(df)
     high_miss_drops = _recommend_drops_from_missing(missing)
 
-    # ── Build comprehensive drop manifest ─────────────────────────
+    # 4. Build comprehensive drop manifest
     all_drops = set()
     all_drops.update(zero_var_drops)
     all_drops.update(leak_drops)
     all_drops.update(high_miss_drops)
+    
     # Collinear pairs: drop the one with lower target correlation
     for pair in collinear:
         a, b = pair["feature_a"], pair["feature_b"]
-        # Keep the one more correlated with target
         a_corr = abs(next((l["target_correlation"] for l in leakage if l["feature"] == a), 0.0))
         b_corr = abs(next((l["target_correlation"] for l in leakage if l["feature"] == b), 0.0))
         all_drops.add(b if a_corr >= b_corr else a)
-    # Never drop target or IDs (they're excluded elsewhere)
+        
+    # Never drop target or IDs
     all_drops.discard(target_col)
     for id_col in id_columns:
         all_drops.discard(id_col)
 
     dropped_features = sorted(all_drops)
 
-    # ── Read Intel Brief to augment leaks ─────────────────────────
-    brief_path = state.get("competition_brief_path", "")
-    if brief_path and os.path.exists(brief_path):
-        brief = read_json(brief_path)
-        for leak in brief.get("known_leaks", []):
-            if leak in df.columns and leak not in dropped_features:
-                dropped_features.append(leak)
-                leakage.append({
-                    "feature": leak,
-                    "target_correlation": 1.0,
-                    "verdict": "FLAG",
-                })
+    # 5. Read Intel Brief to augment leaks
+    brief = state.get("competition_brief", {})
+    for leak in brief.get("known_leaks", []):
+        if leak in df.columns and leak not in dropped_features:
+            dropped_features.append(leak)
+            leakage.append({"feature": leak, "target_correlation": 1.0, "verdict": "FLAG"})
 
-    # ── Build report ──────────────────────────────────────────────
+    # 6. Build report
     summary_text = (
-        f"Analyzed {len(df)} rows × {len(df.columns)} cols. "
-        f"Target='{target_col}'. "
-        f"Drop candidates: {len(dropped_features)} "
+        f"Analyzed {len(df)} rows. Target='{target_col}'. "
+        f"Drops: {len(dropped_features)} "
         f"(zero_var={len(zero_var_drops)}, leakage={len(leak_drops)}, "
-        f"high_missing={len(high_miss_drops)}, collinear={len(collinear)}). "
-        f"Imbalance ratio: {target_dist.get('imbalance_ratio', 'N/A')}. "
-        f"{'Has temporal drift risk' if temporal['has_dates'] else 'No dates detected'}."
+        f"high_missing={len(high_miss_drops)}, collinear={len(collinear)})."
     )
 
     report = {
@@ -499,25 +427,24 @@ def run_eda_agent(state: ProfessorState) -> ProfessorState:
         "summary":                summary_text,
     }
 
-    report_path = f"{output_dir}/eda_report.json"
+    report_path = output_dir / "eda_report.json"
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
-    n_flags = len([x for x in leakage if x["verdict"] == "FLAG"])
-    print(f"[EDAAgent] EDA complete. Flags: {n_flags} | Drops: {len(dropped_features)}")
+    # 7. Update State
+    updates = {
+        "eda_report_path":  str(report_path),
+        "eda_report":       report,
+        "dropped_features": dropped_features,
+    }
 
     log_event(
         session_id=session_id,
-        agent="eda_agent",
+        agent=AGENT_NAME,
         action="eda_completed",
         keys_read=["clean_data_path", "target_col", "id_columns"],
         keys_written=["eda_report_path", "eda_report", "dropped_features"],
         values_changed={"dropped_features": dropped_features},
     )
 
-    return {
-        **state,
-        "eda_report_path":  report_path,
-        "eda_report":       report,
-        "dropped_features": dropped_features,
-    }
+    return ProfessorState.validated_update(state, AGENT_NAME, updates)

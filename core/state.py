@@ -1,441 +1,521 @@
 # core/state.py
 
-from typing import TypedDict, Optional, Any, Annotated, Literal
-import operator
-import uuid
+import json
 import hashlib
 from datetime import datetime, timezone
+from typing import Optional, Any, Dict, List, Union
+from pydantic import BaseModel, Field, ValidationError, ConfigDict
 
-from core.config import ProfessorConfig
+# ── Custom Exceptions ────────────────────────────────────────────────────────
 
+class OwnershipError(Exception):
+    """Raised when an agent attempts to write to a field it does not own."""
+    pass
 
-# ── Custom reducers for LangGraph state channels ─────────────────
-# LangGraph uses reducers to merge state between nodes.
-# Default for list = operator.add (APPEND). This corrupts fields
-# that should be REPLACED each run (dag, cv_scores).
-# We define explicit reducers for every list field.
+class ImmutableFieldError(Exception):
+    """Raised when an [IMMUTABLE] field is overwritten after initial set."""
+    pass
 
-def _replace(existing, new):
-    """Replace reducer: last writer wins. Used for fields that are
-    set fresh each run (dag, cv_scores, feature_manifest)."""
-    return new
+class SchemaVersionError(Exception):
+    """Raised when a checkpoint schema version is unrecognized or incompatible."""
+    pass
 
+# ── Config Flag ──────────────────────────────────────────────────────────────
+OWNERSHIP_STRICT = True
 
-class CostTracker(TypedDict):
-    total_usd: float
-    groq_tokens_in: int
-    groq_tokens_out: int
-    gemini_tokens: int
-    llm_calls: int
-    budget_usd: float
-    warning_threshold: float   # 0.70 -- warn at 70% budget
-    throttle_threshold: float  # 0.85 -- throttle at 85%
-    triage_threshold: float    # 0.95 -- HITL at 95%
+# ── Field Ownership Map ──────────────────────────────────────────────────────
+# Every field from the existing state.py mapped to its owning agent.
+_FIELD_OWNERS = {
+    # Core Pipeline & Supervisor
+    "session_id": "supervisor",
+    "created_at": "supervisor",
+    "competition_name": "supervisor",
+    "dag": "supervisor",
+    "current_node": "supervisor",
+    "next_node": "supervisor",
+    "error_count": "supervisor",
+    "escalation_level": "supervisor",
+    "dag_version": "supervisor",
+    "pipeline_halted": "cost_governor",
+    "pipeline_halt_reason": "cost_governor",
+    "state_schema_version": "supervisor",
+    "state_size_bytes": "supervisor",
 
+    # Competition Intel
+    "competition_brief": "competition_intel",
+    "competition_brief_path": "competition_intel",
+    "intel_brief_path": "competition_intel",
+    "competition_context": "competition_intel",
+    "task_type": "competition_intel",
 
-class CompetitionContext(TypedDict):
-    competition_name: str
-    days_remaining: Optional[int]
-    current_rank: Optional[int]
-    total_teams: Optional[int]
-    submission_count: int
-    submission_limit: int
-    public_lb_score: Optional[float]
-    best_cv_score: Optional[float]
-    lb_cv_gap: Optional[float]
-    shakeup_risk: Optional[str]   # "low" | "medium" | "high"
+    # Pre-flight (Shield 6)
+    "preflight_passed": "preflight",
+    "preflight_warnings": "preflight",
 
+    # Data Engineer
+    "raw_data_path": "data_engineer",
+    "test_data_path": "data_engineer",
+    "sample_submission_path": "data_engineer",
+    "clean_data_path": "data_engineer",
+    "data_hash": "data_engineer",
+    "target_col": "data_engineer",
+    "id_columns": "data_engineer",
+    "schema_path": "data_engineer",
+    "preprocessor_path": "data_engineer",
+    "preprocessor_config_path": "data_engineer",
+    "canonical_train_rows": "data_engineer",
+    "canonical_test_rows": "data_engineer",
+    "canonical_schema": "data_engineer",
+    "canonical_target_stats": "data_engineer",
+    "test_data_checksum": "data_engineer",
 
-class ProfessorState(TypedDict):
-    # ── Identity ──────────────────────────────────────────────────
-    session_id: str              # namespaces ALL resources for this run
-    created_at: str
+    # EDA Agent
+    "eda_report": "eda_agent",
+    "eda_report_path": "eda_agent",
+    "dropped_features": "eda_agent",
 
-    # ── Competition ───────────────────────────────────────────────
-    competition_name: str
-    task_type: Literal["tabular", "timeseries", "nlp", "image", "unknown"]
-    competition_context: dict
+    # Feature Factory
+    "feature_manifest": "feature_factory",
+    "feature_candidates": "feature_factory",
+    "round1_features": "feature_factory",
+    "round2_features": "feature_factory",
+    "round3_features": "feature_factory",
+    "round4_features": "feature_factory",
+    "round5_features": "feature_factory",
+    "feature_factory_checkpoint": "feature_factory",
+    "feature_order": "feature_factory",
+    "feature_data_path": "feature_factory",
+    "features_dropped_stage1": "feature_factory",
+    "features_dropped_stage2": "feature_factory",
+    "features_gate_passed": "feature_factory",
+    "features_gate_dropped": "feature_factory",
 
-    # ── Intel ─────────────────────────────────────────────────────
-    competition_brief_path: str
-    competition_brief: dict
-    intel_brief_path: str
+    # Validation Architect
+    "cv_strategy": "validation_architect",
+    "metric_contract": "validation_architect",
 
-    # ── Data (pointers only -- never raw DataFrames in state) ─────
-    raw_data_path: str
-    test_data_path: str           # path to test.csv (set by data_engineer)
-    sample_submission_path: str   # path to sample_submission.csv
-    clean_data_path: str
-    eda_report_path: str
-    eda_report: dict
-    schema_path: Optional[str]
-    preprocessor_path: Optional[str]
-    preprocessor_config_path: Optional[str]  # LEAKAGE FIX: For CV-safe preprocessor reconstruction
-    data_hash: str     # SHA-256 of source file, first 16 chars
+    # ML Optimizer
+    "cv_scores": "ml_optimizer",
+    "cv_mean": "ml_optimizer",
+    "model_registry": "ml_optimizer",
+    "best_params": "ml_optimizer",
+    "optuna_study_path": "ml_optimizer",
+    "optuna_pruned_trials": "ml_optimizer",
+    "oof_predictions_path": "ml_optimizer",
+    "test_predictions_path": "ml_optimizer",
+    "feature_data_path_test": "ml_optimizer",
+    "memory_peak_gb": "ml_optimizer",
+    "memory_oom_risk": "ml_optimizer",
 
-    # ── Schema Authority (Phase 0) — single source of truth ───────
-    target_col: str               # authoritative target column name
-    id_columns: list              # authoritative ID column names
-    dropped_features: list        # features to exclude (set by EDA, consumed by all)
+    # Red Team Critic
+    "critic_verdict": "red_team_critic",
+    "critic_verdict_path": "red_team_critic",
+    "critic_severity": "red_team_critic",
+    "replan_requested": "red_team_critic",
+    "replan_remove_features": "red_team_critic",
+    "replan_rerun_nodes": "red_team_critic",
+    "competition_fingerprint": "red_team_critic",
+    "warm_start_priors": "red_team_critic",
 
-    # ── Feature Engineering (Day 16: feature factory) ─────────────
-    # REPLACE: feature factory sets the full manifest each run
-    feature_manifest: Annotated[Optional[dict], _replace]
-    feature_candidates: Annotated[Optional[list], _replace]  # names of kept features
-    round1_features: Annotated[Optional[list], _replace]     # Round 1 generic feature names
-    round2_features: Annotated[Optional[list], _replace]     # Round 2 domain feature names
-    feature_factory_checkpoint: Optional[dict]
-    feature_order: Annotated[Optional[list], _replace]   # exact column order at training time
-    feature_data_path: Optional[str]  # path to feature matrix parquet (set by feature_factory)
-    feature_data_path_test: Optional[str]  # path to test feature matrix (set by ml_optimizer)
+    # Problem Reframer
+    "reframe_details": "problem_reframer",
 
-    # ── Validation ────────────────────────────────────────────────
-    cv_strategy: Optional[dict]
-    metric_contract: Optional[dict]
-    # REPLACE: optimizer sets current run's fold scores
-    cv_scores: Annotated[Optional[list], _replace]
-    cv_mean: Optional[float]
+    # Supervisor Replan
+    "features_dropped": "supervisor",
 
-    # ── Models ────────────────────────────────────────────────────
-    # REPLACE: managed manually by the node before returning
-    model_registry: Annotated[Optional[list], _replace]
-    best_params: Optional[dict]
-    optuna_study_path: Optional[str]
+    # Post-Mortem Agent
+    "post_mortem_completed": "post_mortem_agent",
+    "post_mortem_report_path": "post_mortem_agent",
+    "lb_score": "post_mortem_agent",
+    "lb_rank": "post_mortem_agent",
+    "cv_lb_gap": "post_mortem_agent",
+    "gap_root_cause": "post_mortem_agent",
 
-    # -- Critic (Day 10) -------------------------------------------
-    critic_verdict: Optional[dict]
-    critic_verdict_path: str
-    critic_severity: str              # CRITICAL | HIGH | MEDIUM | OK | unchecked
-    replan_requested: bool
-    replan_remove_features: list      # features the critic wants dropped
-    replan_rerun_nodes: list          # nodes to re-run after replan
-    competition_fingerprint: dict     # built from EDA + schema
-    warm_start_priors: list           # retrieved from memory
+    # Ensemble Architect
+    "ensemble_selection": "ensemble_architect",
+    "selected_models": "ensemble_architect",
+    "ensemble_weights": "ensemble_architect",
+    "ensemble_oof": "ensemble_architect",
+    "prize_candidates": "ensemble_architect",
 
-    # -- Supervisor Replan (Day 11) --------------------------------
-    features_dropped: list            # accumulated across all replan cycles
+    # Submission Strategist
+    "submission_path": "submission_strategist",
+    "submission_log": "submission_strategist",
 
-    # -- Post-Mortem (Day 11) --------------------------------------
-    post_mortem_completed: bool
-    post_mortem_report_path: str
-    lb_score: Optional[float]
-    lb_rank: Optional[int]
-    cv_lb_gap: Optional[float]
-    gap_root_cause: str
+    # Circuit Breaker & Cost Governor
+    "current_node_failure_count": "cost_governor",
+    "error_context": "cost_governor",
+    "macro_replan_requested": "cost_governor",
+    "macro_replan_reason": "cost_governor",
+    "triage_mode": "cost_governor",
+    "budget_remaining_usd": "cost_governor",
+    "budget_limit_usd": "cost_governor",
+    "cost_tracker": "cost_governor",
 
-    # ── Ensemble (Day 16: diversity selection) ────────────────────
-    ensemble_selection: Optional[dict]         # full result from select_diverse_ensemble()
-    selected_models: Annotated[Optional[list], _replace]  # names of selected models
-    ensemble_weights: Optional[dict]
-    ensemble_oof: Annotated[Optional[list], _replace]     # blended OOF predictions
-    prize_candidates: Annotated[Optional[list], _replace] # low-corr + competitive CV
-    oof_predictions_path: Optional[str]
-    test_predictions_path: Optional[str]
+    # HITL Listener
+    "hitl_required": "hitl_listener",
+    "hitl_prompt": "hitl_listener",
+    "hitl_checkpoint_key": "hitl_listener",
+    "hitl_intervention_id": "hitl_listener",
+    "hitl_intervention_label": "hitl_listener",
+    "skip_data_validation": "hitl_listener",
+    "null_threshold": "hitl_listener",
+    "impute_strategy": "hitl_listener",
+    "lgbm_override": "hitl_listener",
+    "model_fallback": "hitl_listener",
+    "data_sample_fraction": "hitl_listener",
+    "api_timeout_multiplier": "hitl_listener",
+    "api_backoff_enabled": "hitl_listener",
+    "llm_provider": "hitl_listener",
+    "debug_logging": "hitl_listener",
+    "hitl_injections": "hitl_listener",
+    "hitl_overrides": "hitl_listener",
+    "hitl_feature_hints": "hitl_listener",
+    "hitl_skip_agents": "hitl_listener",
+    "hitl_messages_sent": "hitl_listener",
+    "hitl_checkpoint_responses": "hitl_listener",
+    "pipeline_paused": "hitl_listener",
+    "pipeline_aborted": "hitl_listener",
+    "hitl_checkpoint_timeout": "hitl_listener",
+    "hitl_gate_timeout": "hitl_listener",
 
-    # ── Submission ────────────────────────────────────────────────
-    submission_path: Optional[str]
-    # REPLACE: managed manually by the node before returning
-    submission_log: Annotated[Optional[list], _replace]
+    # Sandbox
+    "debug_diagnostics": "sandbox",
+    "debug_error_class": "sandbox",
+    "debug_retry_layer": "sandbox",
+    "debug_checkpoints": "sandbox",
+    "debug_decomposition": "sandbox",
+    "debug_silent_failures": "sandbox",
+    "debug_fix_rate_by_class": "sandbox",
 
-    # ── Routing ───────────────────────────────────────────────────
-    # REPLACE: router sets the full route, optimizer never appends to it
-    dag: Annotated[Optional[list], _replace]
-    current_node: Optional[str]
-    next_node: Optional[str]
-    error_count: int
-    escalation_level: str        # "micro" | "macro" | "hitl" | "triage"
+    # External Data Scout
+    "external_data_allowed": "data_scout",
+    "external_data_manifest": "data_scout",
 
-    # -- Circuit Breaker (Day 9) -----------------------------------
-    current_node_failure_count: int
-    error_context: list           # [{agent, attempt, error, traceback}]
-    dag_version: int
-    macro_replan_requested: bool
-    macro_replan_reason: str
-    pipeline_halted: bool
-    triage_mode: bool
-    budget_remaining_usd: float
-    budget_limit_usd: float
+    # Lineage & Output
+    "performance_log": "graph builder",
+    "lineage_log": "graph builder",
+    "state_mutations_log": "graph builder",
+    "report_path": "publisher",
+    "lineage_log_path": "publisher",
 
-    # -- Parallel Execution (Day 9) --------------------------------
-    parallel_groups: dict   # {group_name: {status, members}}
+    # Config
+    "config": "supervisor",
+}
 
-    # ── Budget ────────────────────────────────────────────────────
-    cost_tracker: CostTracker
+_IMMUTABLE_FIELDS = {
+    "canonical_train_rows", "canonical_test_rows", "canonical_schema",
+    "canonical_target_stats", "test_data_checksum"
+}
 
-    # -- HITL Human Layer & Interventions (Day 12) -----------------
-    hitl_required: bool
-    hitl_prompt: dict
-    hitl_checkpoint_key: str
-    hitl_intervention_id: int
-    hitl_intervention_label: str
-    skip_data_validation: bool
-    null_threshold: float
-    impute_strategy: str
-    lgbm_override: dict
-    model_fallback: str
-    data_sample_fraction: float
-    api_timeout_multiplier: float
-    api_backoff_enabled: bool
-    llm_provider: str
-    debug_logging: bool
+STATE_SIZE_BUDGET_MB = 20
 
-    # -- Memory Monitoring (Day 12) --------------------------------
-    memory_peak_gb: float
-    memory_oom_risk: bool
-    optuna_pruned_trials: int
+# ── Professor State Model ────────────────────────────────────────────────────
 
-    # -- Feature Filtering (Day 17) ---------------------------------
-    null_importance_result_path: Optional[str]     # path to saved NullImportanceResult (disk, not state)
-    features_dropped_stage1: Annotated[Optional[list], _replace]
-    features_dropped_stage2: Annotated[Optional[list], _replace]
-    features_gate_passed: Annotated[Optional[list], _replace]
-    features_gate_dropped: Annotated[Optional[list], _replace]
-
-    # -- Feature Factory Rounds 3-5 (Day 18) -----------------------
-    round3_features: Annotated[Optional[list], _replace]
-    round4_features: Annotated[Optional[list], _replace]
-    round5_features: Annotated[Optional[list], _replace]
-
-    # -- Pseudo-Labeling (Day 18) ----------------------------------
-    pseudo_label_data_path: Optional[str]          # path to pseudo-labeled data (disk, not state)
-    pseudo_labels_applied: bool
-    pseudo_label_cv_improvement: float
-
-    # -- Performance Monitoring (FLAW-6.1) -------------------------
-    performance_log: Annotated[Optional[list], _replace]  # timing info per node
-
-    # -- External Data Scout (Day 15) ------------------------------
-    external_data_allowed: bool
-    external_data_manifest: dict
-
-    # -- Configuration (Phase 2) -----------------------------------
-    config: Optional["ProfessorConfig"]
-
-    # ── Output ────────────────────────────────────────────────────
-    report_path: Optional[str]
-    lineage_log_path: Optional[str]
-
-
-# =========================================================================
-# GAP 8: Session ID namespace isolation
-# =========================================================================
-
-def generate_session_id(competition_name: str) -> str:
+class ProfessorState(BaseModel):
     """
-    Generates a unique, namespaced session ID.
-    Format: professor_{competition_slug}_{timestamp}_{short_hash}
-    Example: professor_spaceship-titanic_20260301_142200_a3f9c2
-
-    The short hash includes microseconds and uuid4 to ensure uniqueness
-    even if two runs start in the same second.
+    The strictly-typed, validated state for the Professor pipeline.
+    Replaces loose dictionaries and enforces ownership/immutability.
     """
-    now = datetime.now(timezone.utc)
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
-    slug = competition_name.lower().replace(" ", "-").replace("_", "-")[:30]
-    unique_seed = f"{slug}{timestamp}{now.microsecond}{uuid.uuid4().hex}"
-    short_hash = hashlib.md5(unique_seed.encode()).hexdigest()[:6]
-    return f"professor_{slug}_{timestamp}_{short_hash}"
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    # Core Pipeline
+    session_id: str = ""
+    created_at: str = ""
+    competition_name: str = ""
+    dag: Optional[List] = Field(default_factory=list)
+    current_node: Optional[str] = None
+    next_node: Optional[str] = None
+    error_count: int = 0
+    escalation_level: str = "micro"
+    dag_version: int = 1
+    pipeline_halted: bool = False
+    pipeline_halt_reason: str = ""
+    state_schema_version: str = "v2.0"
+    state_size_bytes: int = 0
 
-def build_initial_state(competition_name: str, **kwargs) -> dict:
-    """
-    Factory function for building a valid initial ProfessorState.
-    Always use this instead of building state dicts manually.
-    """
-    session_id = generate_session_id(competition_name)
-    return {
-        "competition_name": competition_name,
-        "session_id": session_id,
-        "output_dir": f"outputs/{session_id}",
-        "budget_session_id": session_id,
-        "budget_limit_usd": 10.0,
-        "budget_spent_usd": 0.0,
-        "dag_version": 1,
-        "current_node_failure_count": 0,
-        "hitl_required": False,
-        "replan_requested": False,
-        "critic_severity": "unchecked",
-        "model_registry": {},
-        "features_dropped": [],
-        "feature_order": [],
-        "external_data_allowed": False,
-        **kwargs,
-    }
+    # Competition Intel
+    competition_brief: Dict = Field(default_factory=dict)
+    competition_brief_path: str = ""
+    intel_brief_path: str = ""
+    competition_context: Dict = Field(default_factory=dict)
+    task_type: str = "unknown"
 
+    # Pre-flight
+    preflight_passed: bool = False
+    preflight_warnings: List = Field(default_factory=list)
 
-def initial_state(
-    competition: str,
-    data_path: str,
-    budget_usd: float = 2.00,
-    task_type: str = "unknown",
-    config: Optional["ProfessorConfig"] = None,
-) -> ProfessorState:
-    """
-    Create a fresh state for a new competition run.
-    
-    Args:
-        competition: Competition name (e.g., "spaceship-titanic")
-        data_path: Path to training data
-        budget_usd: API budget in USD
-        task_type: Task type ("binary", "multiclass", "regression", etc.)
-        config: ProfessorConfig instance. If None, loads from environment.
-    
-    Returns:
-        ProfessorState initialized with default values
-    """
-    
-    # Load config from parameter or environment
-    if config is None:
-        config = ProfessorConfig.from_env()
-    
-    # Apply config to environment (ensures all components see it)
-    config.apply_env()
-    
-    session_id = generate_session_id(competition)
+    # Data Engineer
+    raw_data_path: str = ""
+    test_data_path: str = ""
+    sample_submission_path: str = ""
+    clean_data_path: str = ""
+    data_hash: str = ""
+    target_col: str = ""
+    id_columns: List = Field(default_factory=list)
+    schema_path: Optional[str] = None
+    preprocessor_path: Optional[str] = None
+    preprocessor_config_path: Optional[str] = None
 
-    return ProfessorState(
+    # [IMMUTABLE] Data Integrity
+    canonical_train_rows: int = 0
+    canonical_test_rows: int = 0
+    canonical_schema: Dict = Field(default_factory=dict)
+    canonical_target_stats: Dict = Field(default_factory=dict)
+    test_data_checksum: str = ""
+
+    # EDA
+    eda_report: Dict = Field(default_factory=dict)
+    eda_report_path: str = ""
+    eda_insights_summary: str = ""
+    dropped_features: List = Field(default_factory=list)
+
+    # Feature Factory
+    feature_manifest: Optional[Dict] = None
+    feature_candidates: Optional[List] = None
+    round1_features: Optional[List] = None
+    round2_features: Optional[List] = None
+    round3_features: Optional[List] = None
+    round4_features: Optional[List] = None
+    round5_features: Optional[List] = None
+    feature_factory_checkpoint: Optional[Dict] = None
+    feature_order: List = Field(default_factory=list)
+    feature_data_path: Optional[str] = None
+    features_dropped_stage1: Optional[List] = None
+    features_dropped_stage2: Optional[List] = None
+    features_gate_passed: Optional[List] = None
+    features_gate_dropped: Optional[List] = None
+
+    # Validation
+    cv_strategy: Optional[Dict] = None
+    metric_contract: Optional[Dict] = None
+
+    # Model
+    cv_scores: Optional[List] = None
+    cv_mean: Optional[float] = None
+    model_registry: List = Field(default_factory=list)
+    best_params: Optional[Dict] = None
+    optuna_study_path: Optional[str] = None
+    optuna_pruned_trials: int = 0
+    oof_predictions_path: Optional[str] = None
+    test_predictions_path: Optional[str] = None
+    feature_data_path_test: Optional[str] = None
+    memory_peak_gb: float = 0.0
+    memory_oom_risk: bool = False
+
+    # Critic
+    critic_verdict: Optional[Dict] = None
+    critic_verdict_path: str = ""
+    critic_severity: str = "unchecked"
+    replan_requested: bool = False
+    replan_remove_features: List = Field(default_factory=list)
+    replan_rerun_nodes: List = Field(default_factory=list)
+    competition_fingerprint: Dict = Field(default_factory=dict)
+    warm_start_priors: List = Field(default_factory=list)
+
+    # Reframer
+    reframe_details: Dict = Field(default_factory=dict)
+
+    # Supervisor
+    features_dropped: List = Field(default_factory=list)
+
+    # Post-Mortem
+    post_mortem_completed: bool = False
+    post_mortem_report_path: str = ""
+    lb_score: Optional[float] = None
+    lb_rank: Optional[int] = None
+    cv_lb_gap: Optional[float] = None
+    gap_root_cause: str = ""
+
+    # Ensemble
+    ensemble_selection: Optional[Dict] = None
+    selected_models: Optional[List] = None
+    ensemble_weights: Optional[Dict] = None
+    ensemble_oof: Optional[List] = None
+    prize_candidates: Optional[List] = None
+
+    # Submission
+    submission_path: Optional[str] = None
+    submission_log: List = Field(default_factory=list)
+
+    # Cost & Circuit Breaker
+    current_node_failure_count: int = 0
+    error_context: List = Field(default_factory=list)
+    macro_replan_requested: bool = False
+    macro_replan_reason: str = ""
+    triage_mode: bool = False
+    budget_remaining_usd: float = 2.0
+    budget_limit_usd: float = 2.0
+    cost_tracker: Dict = Field(default_factory=dict)
+
+    # HITL
+    hitl_required: bool = False
+    hitl_prompt: Dict = Field(default_factory=dict)
+    hitl_checkpoint_key: str = ""
+    hitl_intervention_id: int = 0
+    hitl_intervention_label: str = ""
+    skip_data_validation: bool = False
+    null_threshold: float = 1.0
+    impute_strategy: str = "default"
+    lgbm_override: Dict = Field(default_factory=dict)
+    model_fallback: str = ""
+    data_sample_fraction: float = 1.0
+    api_timeout_multiplier: float = 1.0
+    api_backoff_enabled: bool = False
+    llm_provider: str = "groq"
+    debug_logging: bool = False
+    hitl_injections: List = Field(default_factory=list)
+    hitl_overrides: Dict = Field(default_factory=dict)
+    hitl_feature_hints: List = Field(default_factory=list)
+    hitl_skip_agents: List = Field(default_factory=list)
+    hitl_messages_sent: List = Field(default_factory=list)
+    hitl_checkpoint_responses: List = Field(default_factory=list)
+    pipeline_paused: bool = False
+    pipeline_aborted: bool = False
+    hitl_checkpoint_timeout: int = 180
+    hitl_gate_timeout: int = 900
+
+    # Sandbox
+    debug_diagnostics: Dict = Field(default_factory=dict)
+    debug_error_class: str = ""
+    debug_retry_layer: int = 0
+    debug_checkpoints: List = Field(default_factory=list)
+    debug_decomposition: List = Field(default_factory=list)
+    debug_silent_failures: List = Field(default_factory=list)
+    debug_fix_rate_by_class: Dict = Field(default_factory=dict)
+
+    # External Data
+    external_data_allowed: bool = False
+    external_data_manifest: Dict = Field(default_factory=dict)
+
+    # Lineage
+    performance_log: List = Field(default_factory=list)
+    lineage_log: List = Field(default_factory=list)
+    state_mutations_log: List = Field(default_factory=list)
+    report_path: Optional[str] = None
+    lineage_log_path: Optional[str] = None
+
+    # Config
+    config: Any = None
+
+    # ── Legacy Mapping Protocol ──────────────────────────────────────────────
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any):
+        # Direct assignment for legacy compatibility
+        setattr(self, key, value)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def keys(self):
+        return self.model_dump().keys()
+
+    def items(self):
+        return self.model_dump().items()
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    # ── Validation & Enforcement ─────────────────────────────────────────────
+
+    @classmethod
+    def validated_update(cls, state: Union["ProfessorState", Dict[str, Any]], agent_name: str, updates: Dict[str, Any]) -> "ProfessorState":
+        """
+        Agent-safe state update. Enforces ownership, immutability, and types.
+        Handles both ProfessorState objects and legacy dictionaries.
+        """
+        # 1. Normalize to dictionary for processing
+        if isinstance(state, cls):
+            new_data = state.model_dump()
+            current_state_obj = state
+        else:
+            new_data = dict(state)
+            current_state_obj = cls(**new_data)
+        
+        for field, new_value in updates.items():
+            # 2. Ownership
+            owner = _FIELD_OWNERS.get(field)
+            if owner and owner != agent_name:
+                msg = f"Agent '{agent_name}' cannot write to '{field}' — owned by '{owner}'"
+                if OWNERSHIP_STRICT:
+                    raise OwnershipError(msg)
+                else:
+                    print(f"WARNING: {msg}")
+
+            # 3. Immutability
+            if field in _IMMUTABLE_FIELDS:
+                current_val = getattr(current_state_obj, field)
+                # Defaults: 0 for int, {} for dict, "" for str
+                if (isinstance(current_val, int) and current_val != 0) or \
+                   (isinstance(current_val, dict) and current_val) or \
+                   (isinstance(current_val, str) and current_val):
+                    raise ImmutableFieldError(f"Cannot overwrite [IMMUTABLE] field '{field}' after initial set.")
+
+            # 4. Audit Log
+            current_state_obj._log_mutation(agent_name, field, getattr(current_state_obj, field), new_value)
+            new_data[field] = new_value
+
+        # 5. Ensure mutations log is carried over
+        new_data["state_mutations_log"] = current_state_obj.state_mutations_log
+
+        # 6. Re-validate & Return as Object
+        new_state = cls(**new_data)
+        new_state._check_size()
+        return new_state
+
+    def _log_mutation(self, agent_name: str, field: str, old_value: Any, new_value: Any):
+        def get_hash(v):
+            return hashlib.sha256(str(v).encode()).hexdigest()
+        
+        self.state_mutations_log.append({
+            "agent": agent_name,
+            "field": field,
+            "old_hash": get_hash(old_value),
+            "new_hash": get_hash(new_value),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+
+    def _check_size(self):
+        serialized = self.model_dump_json()
+        self.state_size_bytes = len(serialized.encode("utf-8"))
+        
+        budget = STATE_SIZE_BUDGET_MB * 1024 * 1024
+        if self.state_size_bytes > budget:
+            self.hitl_messages_sent = self.hitl_messages_sent[-50:]
+            self.state_mutations_log = self.state_mutations_log[-100:]
+            self.debug_diagnostics = {}
+            self.debug_checkpoints = []
+            self.lineage_log = self.lineage_log[-200:]
+            
+            # Recalculate size
+            self.state_size_bytes = len(self.model_dump_json().encode("utf-8"))
+
+    @classmethod
+    def validate_checkpoint_version(cls, checkpoint_data: Dict[str, Any]) -> Dict[str, Any]:
+        ver = checkpoint_data.get("state_schema_version", "v1.0")
+        if ver == "v2.0":
+            return checkpoint_data
+        if ver == "v1.0":
+            # Migration logic
+            checkpoint_data["state_schema_version"] = "v2.0"
+            return checkpoint_data
+        raise SchemaVersionError(f"Unrecognized schema version: {ver}")
+
+# ── Initial State (Legacy Compatibility) ───────────────────────────────────
+def initial_state(session_id: str = "", raw_data_path: str = "", competition_name: str = "") -> Dict[str, Any]:
+    """Callable initializer for legacy v1 compatibility."""
+    state = ProfessorState(
         session_id=session_id,
-        created_at=datetime.utcnow().isoformat(),
-        competition_name=competition,
-        task_type=task_type,
-        competition_context={
-            "days_remaining":        None,
-            "hours_remaining":       None,
-            "submissions_used":      0,
-            "submissions_remaining": None,
-            "current_public_rank":   None,
-            "total_competitors":     None,
-            "current_percentile":    None,
-            "shakeup_risk":          "unknown",
-            "strategy":              "balanced",
-            "last_updated":          None,
-        },
-        raw_data_path=data_path,
-        test_data_path="",
-        sample_submission_path="",
-        clean_data_path="",
-        eda_report_path="",
-        eda_report={},
-        schema_path=None,
-        preprocessor_path=None,
-        preprocessor_config_path=None,
-        data_hash="",
-        # -- Schema Authority (Phase 0) --
-        target_col="",
-        id_columns=[],
-        dropped_features=[],
-        feature_manifest=None,
-        feature_candidates=None,
-        round1_features=None,
-        round2_features=None,
-        feature_factory_checkpoint=None,
-        feature_order=[],
-        feature_data_path=None,
-        feature_data_path_test=None,
-        cv_strategy=None,
-        metric_contract=None,
-        cv_scores=None,
-        cv_mean=None,
-        model_registry=[],
-        best_params=None,
-        optuna_study_path=None,
-        critic_verdict=None,
-        critic_verdict_path="",
-        critic_severity="unchecked",
-        replan_requested=False,
-        replan_remove_features=[],
-        replan_rerun_nodes=[],
-        competition_fingerprint={},
-        warm_start_priors=[],
-        # -- Supervisor Replan (Day 11) --
-        features_dropped=[],
-        # -- Post-Mortem (Day 11) --
-        post_mortem_completed=False,
-        post_mortem_report_path="",
-        lb_score=None,
-        lb_rank=None,
-        cv_lb_gap=None,
-        gap_root_cause="",
-        ensemble_selection=None,
-        selected_models=None,
-        ensemble_weights=None,
-        ensemble_oof=None,
-        prize_candidates=None,
-        oof_predictions_path=None,
-        test_predictions_path=None,
-        submission_path=None,
-        submission_log=[],
-        dag=None,
-        current_node=None,
-        next_node=None,
-        error_count=0,
-        escalation_level="micro",
-        cost_tracker=CostTracker(
-            total_usd=0.0,
-            groq_tokens_in=0,
-            groq_tokens_out=0,
-            gemini_tokens=0,
-            llm_calls=0,
-            budget_usd=budget_usd,
-            warning_threshold=0.70,
-            throttle_threshold=0.85,
-            triage_threshold=0.95
-        ),
-        report_path=None,
-        lineage_log_path=f"outputs/logs/{session_id}.jsonl",
-        # -- Circuit Breaker (Day 9) --
-        current_node_failure_count=0,
-        error_context=[],
-        dag_version=1,
-        macro_replan_requested=False,
-        macro_replan_reason="",
-        pipeline_halted=False,
-        triage_mode=False,
-        budget_remaining_usd=budget_usd,
-        budget_limit_usd=budget_usd,
-        # -- Parallel Execution (Day 9) --
-        parallel_groups={
-            "intelligence": {"status": "pending", "members": ["competition_intel", "data_engineer"]},
-            "model_trials": {"status": "pending", "members": ["lgbm", "xgb", "catboost"]},
-            "critic":       {"status": "pending", "members": ["vector_1", "vector_2", "vector_3", "vector_4"]},
-        },
-        # -- HITL Human Layer & Interventions (Day 12) --
-        hitl_required=False,
-        hitl_prompt={},
-        hitl_checkpoint_key="",
-        hitl_intervention_id=0,
-        hitl_intervention_label="",
-        skip_data_validation=False,
-        null_threshold=1.0,
-        impute_strategy="default",
-        lgbm_override={},
-        model_fallback="",
-        data_sample_fraction=1.0,
-        api_timeout_multiplier=1.0,
-        api_backoff_enabled=False,
-        llm_provider="groq",
-        debug_logging=False,
-        # -- Memory Monitoring (Day 12) --
-        memory_peak_gb=0.0,
-        memory_oom_risk=False,
-        optuna_pruned_trials=0,
-        # -- Feature Filtering (Day 17) --
-        null_importance_result_path=None,
-        features_dropped_stage1=None,
-        features_dropped_stage2=None,
-        features_gate_passed=None,
-        features_gate_dropped=None,
-        # -- Feature Factory Rounds 3-5 (Day 18) --
-        round3_features=None,
-        round4_features=None,
-        round5_features=None,
-        # -- Pseudo-Labeling (Day 18) --
-        pseudo_label_data_path=None,
-        pseudo_labels_applied=False,
-        pseudo_label_cv_improvement=0.0,
-        # -- External Data Scout (Day 15) --
-        external_data_allowed=False,
-        external_data_manifest={},
-        # -- Configuration (Phase 2) --
-        config=config,
+        raw_data_path=raw_data_path,
+        competition_name=competition_name
     )
+    return state.model_dump()

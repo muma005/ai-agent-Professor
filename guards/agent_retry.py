@@ -26,6 +26,23 @@ def with_agent_retry(agent_name: str):
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(state: ProfessorState) -> ProfessorState:
+            # ── Bridge: Ensure state is the Pydantic object for attribute access ──
+            if not isinstance(state, ProfessorState):
+                # If it's a dict, convert to object
+                # Filter keys to match model fields to avoid ValidationError on legacy keys
+                valid_keys = ProfessorState.model_fields.keys()
+                filtered_data = {k: v for k, v in dict(state).items() if k in valid_keys}
+                
+                # Special handling for config
+                if "config" in filtered_data and isinstance(filtered_data["config"], dict):
+                    from core.config import ProfessorConfig
+                    filtered_data["config"] = ProfessorConfig(**filtered_data["config"])
+                elif "config" not in filtered_data or filtered_data["config"] is None:
+                    from core.config import ProfessorConfig
+                    filtered_data["config"] = ProfessorConfig()
+                    
+                state = ProfessorState(**filtered_data)
+
             for attempt in range(1, MAX_INNER_ATTEMPTS + 1):
                 try:
                     result = fn(state)

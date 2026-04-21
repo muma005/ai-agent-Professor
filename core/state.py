@@ -5,6 +5,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List, Union
 from pydantic import BaseModel, Field, ValidationError, ConfigDict
+from core.config import ProfessorConfig
 
 # ── Custom Exceptions ────────────────────────────────────────────────────────
 
@@ -24,7 +25,6 @@ class SchemaVersionError(Exception):
 OWNERSHIP_STRICT = True
 
 # ── Field Ownership Map ──────────────────────────────────────────────────────
-# Every field from the existing state.py mapped to its owning agent.
 _FIELD_OWNERS = {
     # Core Pipeline & Supervisor
     "session_id": "supervisor",
@@ -41,12 +41,15 @@ _FIELD_OWNERS = {
     "state_schema_version": "supervisor",
     "state_size_bytes": "supervisor",
 
+    # Metadata Authority (Shared)
+    "task_type": ["competition_intel", "data_engineer", "validation_architect"],
+    "target_col": ["competition_intel", "data_engineer", "validation_architect"],
+
     # Competition Intel
     "competition_brief": "competition_intel",
     "competition_brief_path": "competition_intel",
     "intel_brief_path": "competition_intel",
     "competition_context": "competition_intel",
-    "task_type": "competition_intel",
 
     # Pre-flight (Shield 6)
     "preflight_passed": "preflight",
@@ -58,7 +61,6 @@ _FIELD_OWNERS = {
     "sample_submission_path": "data_engineer",
     "clean_data_path": "data_engineer",
     "data_hash": "data_engineer",
-    "target_col": "data_engineer",
     "id_columns": "data_engineer",
     "schema_path": "data_engineer",
     "preprocessor_path": "data_engineer",
@@ -72,6 +74,7 @@ _FIELD_OWNERS = {
     # EDA Agent
     "eda_report": "eda_agent",
     "eda_report_path": "eda_agent",
+    "eda_insights_summary": "eda_agent",
     "dropped_features": "eda_agent",
 
     # Feature Factory
@@ -91,8 +94,13 @@ _FIELD_OWNERS = {
     "features_gate_dropped": "feature_factory",
 
     # Validation Architect
+    "validation_strategy": "validation_architect",
+    "validation_strategy_path": "validation_architect",
+    "metric_contract_path": "validation_architect",
     "cv_strategy": "validation_architect",
     "metric_contract": "validation_architect",
+    "hitl_required": ["validation_architect", "hitl_listener"],
+    "hitl_reason": ["validation_architect", "hitl_listener"],
 
     # ML Optimizer
     "cv_scores": "ml_optimizer",
@@ -153,7 +161,6 @@ _FIELD_OWNERS = {
     "cost_tracker": "cost_governor",
 
     # HITL Listener
-    "hitl_required": "hitl_listener",
     "hitl_prompt": "hitl_listener",
     "hitl_checkpoint_key": "hitl_listener",
     "hitl_intervention_id": "hitl_listener",
@@ -190,7 +197,7 @@ _FIELD_OWNERS = {
 
     # External Data Scout
     "external_data_allowed": "data_scout",
-    "external_data_manifest": "data_scout",
+    "external_data_manifest": "competition_intel",
 
     # Lineage & Output
     "performance_log": "graph builder",
@@ -287,6 +294,9 @@ class ProfessorState(BaseModel):
     features_gate_dropped: Optional[List] = None
 
     # Validation
+    validation_strategy: Optional[Dict] = None
+    validation_strategy_path: str = ""
+    metric_contract_path: str = ""
     cv_strategy: Optional[Dict] = None
     metric_contract: Optional[Dict] = None
 
@@ -350,6 +360,7 @@ class ProfessorState(BaseModel):
 
     # HITL
     hitl_required: bool = False
+    hitl_reason: str = ""
     hitl_prompt: Dict = Field(default_factory=dict)
     hitl_checkpoint_key: str = ""
     hitl_intervention_id: int = 0
@@ -396,7 +407,7 @@ class ProfessorState(BaseModel):
     lineage_log_path: Optional[str] = None
 
     # Config
-    config: Any = None
+    config: ProfessorConfig = Field(default_factory=ProfessorConfig)
 
     # ── Legacy Mapping Protocol ──────────────────────────────────────────────
 
@@ -407,7 +418,6 @@ class ProfessorState(BaseModel):
             raise KeyError(key)
 
     def __setitem__(self, key: str, value: Any):
-        # Direct assignment for legacy compatibility
         setattr(self, key, value)
 
     def __contains__(self, key: str) -> bool:
@@ -433,28 +443,40 @@ class ProfessorState(BaseModel):
         Agent-safe state update. Enforces ownership, immutability, and types.
         Handles both ProfessorState objects and legacy dictionaries.
         """
-        # 1. Normalize to dictionary for processing
+        # 1. Normalize to object for processing
         if isinstance(state, cls):
-            new_data = state.model_dump()
             current_state_obj = state
         else:
-            new_data = dict(state)
-            current_state_obj = cls(**new_data)
+            # Filter for valid fields to avoid errors on extra legacy keys
+            valid_keys = cls.model_fields.keys()
+            filtered_data = {k: v for k, v in dict(state).items() if k in valid_keys}
+            
+            # Ensure config is an object
+            if "config" in filtered_data and isinstance(filtered_data["config"], dict):
+                filtered_data["config"] = ProfessorConfig(**filtered_data["config"])
+            elif "config" not in filtered_data or filtered_data["config"] is None:
+                filtered_data["config"] = ProfessorConfig()
+                
+            current_state_obj = cls(**filtered_data)
+        
+        new_data = current_state_obj.model_dump()
         
         for field, new_value in updates.items():
             # 2. Ownership
             owner = _FIELD_OWNERS.get(field)
-            if owner and owner != agent_name:
-                msg = f"Agent '{agent_name}' cannot write to '{field}' — owned by '{owner}'"
-                if OWNERSHIP_STRICT:
-                    raise OwnershipError(msg)
-                else:
-                    print(f"WARNING: {msg}")
+            if owner:
+                # Support single string or list of agents
+                allowed_owners = [owner] if isinstance(owner, str) else owner
+                if agent_name not in allowed_owners:
+                    msg = f"Agent '{agent_name}' cannot write to '{field}' — owned by '{owner}'"
+                    if OWNERSHIP_STRICT:
+                        raise OwnershipError(msg)
+                    else:
+                        print(f"WARNING: {msg}")
 
             # 3. Immutability
             if field in _IMMUTABLE_FIELDS:
                 current_val = getattr(current_state_obj, field)
-                # Defaults: 0 for int, {} for dict, "" for str
                 if (isinstance(current_val, int) and current_val != 0) or \
                    (isinstance(current_val, dict) and current_val) or \
                    (isinstance(current_val, str) and current_val):
@@ -464,10 +486,9 @@ class ProfessorState(BaseModel):
             current_state_obj._log_mutation(agent_name, field, getattr(current_state_obj, field), new_value)
             new_data[field] = new_value
 
-        # 5. Ensure mutations log is carried over
+        # 5. Re-validate & Return as Object
         new_data["state_mutations_log"] = current_state_obj.state_mutations_log
-
-        # 6. Re-validate & Return as Object
+        
         new_state = cls(**new_data)
         new_state._check_size()
         return new_state
@@ -495,27 +516,36 @@ class ProfessorState(BaseModel):
             self.debug_diagnostics = {}
             self.debug_checkpoints = []
             self.lineage_log = self.lineage_log[-200:]
-            
-            # Recalculate size
             self.state_size_bytes = len(self.model_dump_json().encode("utf-8"))
 
     @classmethod
     def validate_checkpoint_version(cls, checkpoint_data: Dict[str, Any]) -> Dict[str, Any]:
         ver = checkpoint_data.get("state_schema_version", "v1.0")
-        if ver == "v2.0":
-            return checkpoint_data
+        if ver == "v2.0": return checkpoint_data
         if ver == "v1.0":
-            # Migration logic
             checkpoint_data["state_schema_version"] = "v2.0"
             return checkpoint_data
         raise SchemaVersionError(f"Unrecognized schema version: {ver}")
 
 # ── Initial State (Legacy Compatibility) ───────────────────────────────────
-def initial_state(session_id: str = "", raw_data_path: str = "", competition_name: str = "") -> Dict[str, Any]:
-    """Callable initializer for legacy v1 compatibility."""
-    state = ProfessorState(
-        session_id=session_id,
-        raw_data_path=raw_data_path,
-        competition_name=competition_name
-    )
+def initial_state(**kwargs) -> Dict[str, Any]:
+    """Flexible initializer for legacy compatibility."""
+    config = kwargs.get("config", ProfessorConfig())
+    if isinstance(config, dict):
+        config = ProfessorConfig(**config)
+        
+    data = {
+        "session_id":       kwargs.get("session_id", ""),
+        "competition_name": kwargs.get("competition_name", kwargs.get("competition", "")),
+        "raw_data_path":    kwargs.get("raw_data_path", kwargs.get("data_path", "")),
+        "budget_limit_usd": kwargs.get("budget_limit_usd", kwargs.get("budget_usd", 2.0)),
+        "config":           config
+    }
+    
+    valid_keys = ProfessorState.model_fields.keys()
+    for k, v in kwargs.items():
+        if k in valid_keys and k not in data:
+            data[k] = v
+
+    state = ProfessorState(**data)
     return state.model_dump()

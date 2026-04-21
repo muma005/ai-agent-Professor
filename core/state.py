@@ -326,6 +326,18 @@ class ProfessorState(BaseModel):
     # Reframer
     reframe_details: Dict = Field(default_factory=dict)
 
+    # Pseudo Label
+    pseudo_labels_applied: bool = False
+    pseudo_label_skip_reason: str = ""
+    pseudo_label_halt_reason: str = ""
+    pseudo_label_iterations: int = 0
+    pseudo_label_n_added: int = 0
+    pseudo_label_cv_improvement: float = 0.0
+    pseudo_label_confidence_mean: float = 0.0
+    pseudo_label_confidence_std: float = 0.0
+    pseudo_label_critic_accepted: bool = False
+    clean_train_with_pseudo_path: str = ""
+
     # Supervisor
     features_dropped: List = Field(default_factory=list)
 
@@ -342,11 +354,27 @@ class ProfessorState(BaseModel):
     selected_models: Optional[List] = None
     ensemble_weights: Optional[Dict] = None
     ensemble_oof: Optional[List] = None
+    ensemble_accepted: bool = False
+    ensemble_holdout_score: float = 0.0
+    ensemble_correlation_matrix: Dict = Field(default_factory=dict)
+    models_pruned_diversity: List = Field(default_factory=list)
+    meta_learner_used: bool = False
     prize_candidates: Optional[List] = None
 
     # Submission
     submission_path: Optional[str] = None
     submission_log: List = Field(default_factory=list)
+    submission_freeze_active: bool = False
+    submission_freeze_reason: str = ""
+    ewma_current: Optional[float] = None
+    ewma_initial: Optional[float] = None
+    n_submissions_with_lb: int = 0
+    submission_a_path: str = ""
+    submission_b_path: str = ""
+    submission_a_model: str = ""
+    submission_b_model: str = ""
+    submission_b_correlation_with_a: float = 0.0
+    submission_log_path: str = ""
 
     # Cost & Circuit Breaker
     current_node_failure_count: int = 0

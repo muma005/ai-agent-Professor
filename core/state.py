@@ -63,7 +63,7 @@ _FIELD_OWNERS = {
     "data_hash": "data_engineer",
     "id_columns": "data_engineer",
     "schema_path": "data_engineer",
-    "preprocessor_path": "data_engineer",
+    "preprocessor_path": "feature_factory",
     "preprocessor_config_path": "data_engineer",
     "canonical_train_rows": "data_engineer",
     "canonical_test_rows": "data_engineer",

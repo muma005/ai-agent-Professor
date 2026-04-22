@@ -31,8 +31,15 @@ def _run_v1_eda_logic(df: pl.DataFrame, target_col: str, id_columns: List[str]) 
         target_dist = {
             "n_unique": s.n_unique(),
             "mean": float(s.mean()) if s.dtype.is_numeric() else None,
-            "counts": s.value_counts().to_dict(as_series=False)
+            "counts": s.value_counts().to_dict(as_series=False),
+            "imbalance_ratio": 1.0 # Default for legacy
         }
+        
+        # Calculate real imbalance for classification
+        if s.dtype in (pl.Utf8, pl.String, pl.Boolean) or s.n_unique() <= 10:
+            vc = s.value_counts().sort("count")
+            if len(vc) >= 2:
+                target_dist["imbalance_ratio"] = float(vc[0, "count"] / vc[-1, "count"])
 
     # 2. Correlations
     correlations = {}
@@ -76,7 +83,7 @@ def _run_v1_eda_logic(df: pl.DataFrame, target_col: str, id_columns: List[str]) 
         "duplicate_analysis": {"count": dupe_count, "pct": round(dupe_count/len(df)*100, 2)},
         "temporal_profile": temporal,
         "leakage_fingerprint": leaks,
-        "drop_candidates": drops,
+        "drop_manifest": drops,
         "summary": summary
     }
 
@@ -140,6 +147,16 @@ def run_eda_agent(state: ProfessorState) -> ProfessorState:
     """
     Enhanced EDA with Deep Analysis + Actionable Context.
     """
+    # 1. Skip logic
+    config = state.get("config")
+    if config and config.agents.skip_eda:
+        logger.info(f"[{AGENT_NAME}] Skipping per config.")
+        return ProfessorState.validated_update(state, AGENT_NAME, {
+            "eda_report": {},
+            "eda_report_path": "",
+            "eda_insights_summary": "EDA skipped by user configuration."
+        })
+
     session_id = state.get("session_id", "default")
     output_dir = Path(f"outputs/{session_id}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -180,12 +197,12 @@ Duplicate rows: {v1_report['duplicate_analysis']['count']}
         "eda_mutual_info": deep_analysis["mutual_info"],
         "eda_vif_report": deep_analysis["vif_report"],
         "eda_modality_flags": deep_analysis["modality_flags"],
-        "eda_report_path": str(output_dir / "eda_report_v2.json")
+        "eda_report_path": str(output_dir / "eda_report.json")
     }
     
-    # Persist the report
+    # Persist the report (V1 format as requested by contract)
     with open(updates["eda_report_path"], "w") as f:
-        json.dump(updates, f, indent=2, default=str)
+        json.dump(v1_report, f, indent=2, default=str)
 
     log_event(
         session_id=session_id,

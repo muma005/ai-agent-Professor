@@ -124,6 +124,14 @@ def _get_as_dict(state: Union[ProfessorState, Dict[str, Any]]) -> Dict[str, Any]
 def _get_as_object(data: Dict[str, Any]) -> ProfessorState:
     valid_keys = ProfessorState.model_fields.keys()
     filtered = {k: v for k, v in data.items() if k in valid_keys}
+    
+    if "config" in filtered and isinstance(filtered["config"], dict):
+        from core.config import ProfessorConfig
+        filtered["config"] = ProfessorConfig(**filtered["config"])
+    elif "config" not in filtered or filtered["config"] is None:
+        from core.config import ProfessorConfig
+        filtered["config"] = ProfessorConfig()
+        
     return ProfessorState(**filtered)
 
 def get_escalation_level(state: ProfessorState) -> EscalationLevel:
@@ -131,6 +139,11 @@ def get_escalation_level(state: ProfessorState) -> EscalationLevel:
     budget_limit     = state.get("budget_limit_usd", 2.0)
     
     if budget_limit > 0 and budget_remaining <= budget_limit * 0.05:
+        return EscalationLevel.TRIAGE
+
+    # Time exhaustion check
+    context = state.get("competition_context", {})
+    if isinstance(context, dict) and context.get("hours_remaining", 99) <= 2:
         return EscalationLevel.TRIAGE
 
     failure_count = state.get("current_node_failure_count", 0)
@@ -149,9 +162,10 @@ def handle_escalation(
     logger.error(f"[CircuitBreaker] {agent_name} escalating to {level.value}. Error: {error}")
     
     # Audit log
+    session_id = state.get("session_id", "unknown")
     try:
         log_event(
-            session_id=state.get("session_id", "unknown"),
+            session_id=session_id,
             agent="circuit_breaker",
             action=f"escalation_{level.value}",
             values_changed={"agent": agent_name, "error": str(error)}
@@ -185,7 +199,7 @@ def handle_escalation(
         state_dict.update({
             "hitl_required": True,
             "pipeline_halted": True,
-            "hitl_reason": f"Pipeline paused after {agent_name} failed 3 times: {error}"
+            "hitl_reason": f"Pipeline paused after {agent_name} failed 3 times: {error} (session: {session_id})"
         })
 
     elif level == EscalationLevel.TRIAGE:
@@ -203,7 +217,113 @@ def reset_failure_count(state: ProfessorState) -> ProfessorState:
     state_dict.update({"current_node_failure_count": 0, "error_context": []})
     return _get_as_object(state_dict)
 
+def _describe_attempt(state: ProfessorState, agent_name: str) -> str:
+    return f"{agent_name} attempted to execute but encountered an error."
+
+def _write_hitl_prompt(session_id: str, prompt: dict) -> None:
+    path = f"outputs/{session_id}/hitl_prompt.json"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(prompt, f, indent=2)
+    except Exception as e:
+        logger.warning(f"[CircuitBreaker] Failed to write hitl_prompt to {path}: {e}")
+
+def _print_hitl_banner(prompt: dict) -> None:
+    print("\n╔══════════════════════════════════════════════════════════╗")
+    print("║              ⚠  PROFESSOR PAUSED — HITL REQUIRED         ║")
+    print("╚══════════════════════════════════════════════════════════╝\n")
+    print(f"Agent:    {prompt['failed_agent']}")
+    print(f"Failure:  {prompt['failure_count']} consecutive failures ({prompt['why_it_failed']})")
+    print(f"Class:    {prompt['error_class']}")
+    print(f"Session:  {prompt['session_id']}\n")
+    print(f"What was attempted:\n  {prompt['what_was_attempted']}\n")
+
+def _classify_error(agent_name: str, error: Exception) -> str:
+    err_type = type(error).__name__
+    err_repr = repr(type(error)).lower() + repr(error).lower()
+    if err_type in ERROR_CLASS_MAP:
+        return ERROR_CLASS_MAP[err_type]
+    for k, v in ERROR_CLASS_MAP.items():
+        if k.lower() in err_repr:
+            return v
+    return "unknown"
+
+def _build_interventions(state: ProfessorState, agent_name: str, error_class: str, error: Exception) -> list:
+    return INTERVENTION_TEMPLATES.get(error_class, INTERVENTION_TEMPLATES["unknown"])
+
+def generate_hitl_prompt(state: ProfessorState, agent_name: str, error: Exception) -> dict:
+    error_class = _classify_error(agent_name, error)
+    interventions = _build_interventions(state, agent_name, error_class, error)
+    
+    prompt = {
+        "session_id":        state["session_id"] if isinstance(state, dict) else state.session_id,
+        "failed_agent":      agent_name,
+        "failure_count":     state.get("current_node_failure_count", 3),
+        "what_was_attempted": _describe_attempt(state, agent_name),
+        "why_it_failed":     str(error)[:500],
+        "error_class":       error_class,
+        "interventions":     interventions,
+        "resume_command":    f"professor resume --session {state.get('session_id', 'unknown')}",
+        "checkpoint_key":    f"professor:hitl:{state.get('session_id', 'unknown')}",
+        "generated_at":      datetime.now(timezone.utc).isoformat(),
+    }
+    
+    _write_hitl_prompt(state.get('session_id', 'unknown'), prompt)
+    _print_hitl_banner(prompt)
+    return prompt
+
 def resume_from_checkpoint(session_id: str, intervention_id: int) -> ProfessorState:
-    # Logic remains same but returns _get_as_object(state_dict)
-    # Stub for now
-    return ProfessorState(session_id=session_id)
+    """Resumes pipeline from Redis/local checkpoint, applying HITL intervention."""
+    from memory.redis_state import get_redis_client
+    
+    try:
+        redis = get_redis_client()
+        key = f"professor:hitl:{session_id}"
+        payload = redis.get(key)
+        
+        if not payload:
+            logger.error(f"[CircuitBreaker] No checkpoint found for {session_id}")
+            return {
+                "hitl_required": True,
+                "hitl_message": f"No checkpoint found for {session_id}. Cannot resume."
+            }
+            
+        checkpoint = json.loads(payload.decode('utf-8'))
+        state_dict = checkpoint["state"]
+        error_class = checkpoint.get("error_class", "unknown")
+        
+        # 1. Validate intervention_id
+        if intervention_id not in [1, 2, 3]:
+            logger.error(f"[CircuitBreaker] Invalid intervention_id: {intervention_id}")
+            return {
+                "hitl_required": True,
+                "hitl_message": "intervention_id must be 1, 2, or 3."
+            }
+            
+        # 2. Apply common resets
+        state_dict.update({
+            "hitl_required": False,
+            "pipeline_halted": False,
+            "pipeline_paused": False,
+            "current_node_failure_count": 0,
+            "error_context": [],
+            "hitl_intervention_id": intervention_id
+        })
+        
+        # 3. Handle specific interventions
+        templates = INTERVENTION_TEMPLATES.get(error_class, INTERVENTION_TEMPLATES["unknown"])
+        intervention = next((t for t in templates if t["id"] == intervention_id), None)
+        if intervention:
+            state_dict["hitl_intervention_label"] = intervention["label"]
+            if intervention_id == 1 and error_class == "data_quality":
+                state_dict["skip_data_validation"] = True
+        
+        return state_dict
+
+    except Exception as e:
+        logger.error(f"[CircuitBreaker] Resume failed: {e}")
+        return {
+            "hitl_required": True,
+            "hitl_message": f"Checkpoint corrupt or invalid: {e}"
+        }

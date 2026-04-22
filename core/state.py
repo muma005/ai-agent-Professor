@@ -32,12 +32,12 @@ _FIELD_OWNERS = {
     "competition_name": "supervisor",
     "dag": ["semantic_router", "supervisor"],
     "current_node": "supervisor",
-    "next_node": "supervisor",
+    "next_node": ["semantic_router", "supervisor"],
     "error_count": "supervisor",
     "escalation_level": "supervisor",
     "dag_version": "supervisor",
-    "pipeline_halted": "supervisor",
-    "pipeline_halt_reason": "supervisor",
+    "pipeline_halted": ["supervisor", "cost_governor", "circuit_breaker", "hitl_listener"],
+    "pipeline_halt_reason": ["supervisor", "cost_governor", "circuit_breaker", "hitl_listener"],
     "state_schema_version": "supervisor",
     "state_size_bytes": "supervisor",
     "task_type": ["competition_intel", "data_engineer", "validation_architect", "semantic_router", "supervisor"],
@@ -47,7 +47,7 @@ _FIELD_OWNERS = {
     "competition_brief": "competition_intel",
     "competition_brief_path": "competition_intel",
     "intel_brief_path": ["competition_intel", "domain_researcher"],
-    "competition_context": "domain_researcher",
+    "competition_context": ["competition_intel", "domain_researcher"],
     "external_data_manifest": "competition_intel",
 
     # Pre-flight (Shield 6)
@@ -397,7 +397,7 @@ class ProfessorState(BaseModel):
     triage_mode: bool = False
     budget_remaining_usd: float = 2.0
     budget_limit_usd: float = 2.0
-    cost_tracker: Dict = Field(default_factory=dict)
+    cost_tracker: Dict = Field(default_factory=lambda: {"llm_calls": 0, "api_cost_usd": 0.0})
 
     # HITL
     hitl_required: bool = False
@@ -557,6 +557,8 @@ class ProfessorState(BaseModel):
             self.debug_diagnostics = {}
             self.debug_checkpoints = []
             self.lineage_log = self.lineage_log[-200:]
+            
+            # Recalculate size
             self.state_size_bytes = len(self.model_dump_json().encode("utf-8"))
 
     @classmethod
@@ -576,19 +578,26 @@ def generate_session_id(competition_name: str) -> str:
     return f"professor_{now}"
 
 # ── Initial State (Legacy Compatibility) ───────────────────────────────────
-def initial_state(**kwargs) -> Dict[str, Any]:
+def initial_state(*args, **kwargs) -> Dict[str, Any]:
     """Flexible initializer for legacy compatibility."""
+    # Map positional args if provided: (session_id, raw_data_path, competition_name)
+    data = {}
+    if len(args) >= 1: data["session_id"] = args[0]
+    if len(args) >= 2: data["raw_data_path"] = args[1]
+    if len(args) >= 3: data["competition_name"] = args[2]
+
+    # Overlay kwargs
+    data.update({
+        "session_id":       kwargs.get("session_id", data.get("session_id", "")),
+        "competition_name": kwargs.get("competition_name", kwargs.get("competition", data.get("competition_name", ""))),
+        "raw_data_path":    kwargs.get("raw_data_path", kwargs.get("data_path", data.get("raw_data_path", ""))),
+        "budget_limit_usd": kwargs.get("budget_limit_usd", kwargs.get("budget_usd", 2.0)),
+    })
+    
     config = kwargs.get("config", ProfessorConfig())
     if isinstance(config, dict):
         config = ProfessorConfig(**config)
-        
-    data = {
-        "session_id":       kwargs.get("session_id", ""),
-        "competition_name": kwargs.get("competition_name", kwargs.get("competition", "")),
-        "raw_data_path":    kwargs.get("raw_data_path", kwargs.get("data_path", "")),
-        "budget_limit_usd": kwargs.get("budget_limit_usd", kwargs.get("budget_usd", 2.0)),
-        "config":           config
-    }
+    data["config"] = config
     
     valid_keys = ProfessorState.model_fields.keys()
     for k, v in kwargs.items():

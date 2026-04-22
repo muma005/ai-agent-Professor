@@ -76,7 +76,7 @@ class TestEDAV2Contract:
             required_keys = {
                 "target_distribution", "correlations", "outlier_profile",
                 "duplicate_analysis", "temporal_profile", "leakage_fingerprint",
-                "drop_candidates", "summary"
+                "drop_manifest", "summary"
             }
             assert required_keys.issubset(final_state["eda_report"].keys())
 
@@ -88,5 +88,7 @@ class TestEDAV2Contract:
             
             with open(final_state["eda_report_path"], "r") as f:
                 report = json.load(f)
-                assert "eda_insights_summary" in report
-                assert "eda_report" in report
+                # The agent now saves the V1 report to eda_report.json
+                # We verify the keys inside it
+                assert "target_distribution" in report
+                assert "summary" in report

@@ -250,6 +250,11 @@ class ProfessorState(BaseModel):
     # Pre-flight
     preflight_passed: bool = False
     preflight_warnings: List = Field(default_factory=list)
+    preflight_data_files: List = Field(default_factory=list)
+    preflight_data_size_mb: float = 0.0
+    preflight_submission_format: Dict = Field(default_factory=dict)
+    preflight_target_type: str = "unknown"
+    preflight_unsupported_modalities: List = Field(default_factory=list)
 
     # Data Engineer
     raw_data_path: str = ""

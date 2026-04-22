@@ -279,6 +279,12 @@ class ProfessorState(BaseModel):
     eda_report: Dict = Field(default_factory=dict)
     eda_report_path: str = ""
     eda_insights_summary: str = ""
+    eda_mutual_info: Dict = Field(default_factory=dict)
+    eda_vif_report: Dict = Field(default_factory=dict)
+    eda_modality_flags: List = Field(default_factory=list)
+    eda_plots_paths: List = Field(default_factory=list)
+    eda_plots_delivered: bool = False
+    eda_quick_baseline_importance: Dict = Field(default_factory=dict)
     dropped_features: List = Field(default_factory=list)
 
     # Feature Factory

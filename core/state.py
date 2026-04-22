@@ -46,8 +46,8 @@ _FIELD_OWNERS = {
     # Competition Intel
     "competition_brief": "competition_intel",
     "competition_brief_path": "competition_intel",
-    "intel_brief_path": "competition_intel",
-    "competition_context": "competition_intel",
+    "intel_brief_path": ["competition_intel", "domain_researcher"],
+    "competition_context": "domain_researcher",
     "external_data_manifest": "competition_intel",
 
     # Pre-flight (Shield 6)

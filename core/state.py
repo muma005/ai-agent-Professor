@@ -246,6 +246,9 @@ class ProfessorState(BaseModel):
     intel_brief_path: str = ""
     competition_context: Dict = Field(default_factory=dict)
     task_type: str = "unknown"
+    adversarial_auc: float = 0.5
+    drift_report: Dict = Field(default_factory=dict)
+    drift_report_path: str = ""
 
     # Pre-flight
     preflight_passed: bool = False

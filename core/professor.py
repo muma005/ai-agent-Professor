@@ -9,8 +9,10 @@ import contextlib
 import logging
 import threading
 import traceback
+import functools
 import numpy as np
 import polars as pl
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime, timezone
 from langgraph.graph import StateGraph, END
@@ -56,17 +58,24 @@ def route_after_router(state: ProfessorState) -> str:
         return END
     return dag[0]
 
-def route_after_node(state: ProfessorState) -> str:
+def route_after_node(state: ProfessorState, node_name: str) -> str:
     """Generic DAG-driven routing with shield checks."""
     if state.pipeline_halted or state.triage_mode:
         return END
         
-    current = state.current_node
     dag = state.dag or []
-    if current not in dag:
+    
+    # ── Handle Shield Transition ──
+    # If we are at metric_gate, we find where validation_architect was in the DAG
+    if node_name == "metric_gate":
+        reference_node = "validation_architect"
+    else:
+        reference_node = node_name
+
+    if reference_node not in dag:
         return END
         
-    idx = dag.index(current)
+    idx = dag.index(reference_node)
     if idx + 1 >= len(dag):
         return END
         
@@ -82,20 +91,13 @@ def route_after_critic(state: ProfessorState) -> str:
             return END
         return "supervisor_replan"
         
-    return _advance_dag(state, "red_team_critic")
+    return route_after_node(state, "red_team_critic")
 
 def route_after_supervisor_replan(state: ProfessorState) -> str:
     """After supervisor_replan: re-enter at earliest affected node."""
     if state.pipeline_halted:
         return END
     return get_replan_target(state)
-
-def _advance_dag(state: ProfessorState, current: str) -> str:
-    dag = state.dag or []
-    if current not in dag: return END
-    idx = dag.index(current)
-    if idx + 1 >= len(dag): return END
-    return dag[idx + 1]
 
 # ── Build the graph ───────────────────────────────────────────────
 
@@ -144,26 +146,63 @@ def build_graph() -> StateGraph:
         ]} | {END: END}
     )
 
+    # Helper for generic DAG-driven routing
+    def _get_router(node_name):
+        def _route(state: ProfessorState):
+            return route_after_node(state, node_name)
+        return _route
+
     # All nodes follow the DAG except special cases
     for node in ["competition_intel", "data_engineer", "eda_agent", 
                  "feature_factory", "ml_optimizer", "ensemble_architect",
                  "pseudo_label_agent", "submission_strategist", "publisher"]:
-        graph.add_conditional_edges(node, route_after_node, {n: n for n in [
+        graph.add_conditional_edges(
+            node, 
+            _get_router(node), 
+            {n: n for n in [
+                "competition_intel", "data_engineer", "eda_agent", 
+                "validation_architect", "feature_factory", "ml_optimizer",
+                "ensemble_architect", "red_team_critic", "pseudo_label_agent",
+                "submission_strategist", "publisher", "qa_gate"
+            ]} | {END: END}
+        )
+
+    # Special transition: validation_architect must run metric_gate
+    graph.add_edge("validation_architect", "metric_gate")
+    graph.add_conditional_edges(
+        "metric_gate", 
+        _get_router("metric_gate"),
+        {n: n for n in [
             "competition_intel", "data_engineer", "eda_agent", 
             "validation_architect", "feature_factory", "ml_optimizer",
             "ensemble_architect", "red_team_critic", "pseudo_label_agent",
             "submission_strategist", "publisher", "qa_gate"
-        ]} | {END: END})
-
-    # Special transition: validation_architect must run metric_gate
-    graph.add_edge("validation_architect", "metric_gate")
-    graph.add_conditional_edges("metric_gate", route_after_node)
+        ]} | {END: END}
+    )
 
     # Special transition: red_team_critic can trigger replan
-    graph.add_conditional_edges("red_team_critic", route_after_critic)
+    graph.add_conditional_edges(
+        "red_team_critic", 
+        route_after_critic,
+        {n: n for n in [
+            "supervisor_replan", "competition_intel", "data_engineer", "eda_agent", 
+            "validation_architect", "feature_factory", "ml_optimizer",
+            "ensemble_architect", "pseudo_label_agent",
+            "submission_strategist", "publisher", "qa_gate"
+        ]} | {END: END}
+    )
     
     # Special transition: supervisor_replan re-enters
-    graph.add_conditional_edges("supervisor_replan", route_after_supervisor_replan)
+    graph.add_conditional_edges(
+        "supervisor_replan", 
+        route_after_supervisor_replan,
+        {n: n for n in [
+            "competition_intel", "data_engineer", "eda_agent", 
+            "validation_architect", "feature_factory", "ml_optimizer",
+            "ensemble_architect", "red_team_critic", "pseudo_label_agent",
+            "submission_strategist", "publisher", "qa_gate"
+        ]} | {END: END}
+    )
 
     graph.add_edge("qa_gate", END)
 

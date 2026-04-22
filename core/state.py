@@ -26,30 +26,29 @@ OWNERSHIP_STRICT = True
 
 # ── Field Ownership Map ──────────────────────────────────────────────────────
 _FIELD_OWNERS = {
-    # Core Pipeline & Supervisor
+    # Core Pipeline & Supervisor (System-level Authority)
     "session_id": "supervisor",
     "created_at": "supervisor",
     "competition_name": "supervisor",
-    "dag": "supervisor",
+    "dag": ["semantic_router", "supervisor"],
     "current_node": "supervisor",
     "next_node": "supervisor",
     "error_count": "supervisor",
     "escalation_level": "supervisor",
     "dag_version": "supervisor",
-    "pipeline_halted": "cost_governor",
-    "pipeline_halt_reason": "cost_governor",
+    "pipeline_halted": "supervisor",
+    "pipeline_halt_reason": "supervisor",
     "state_schema_version": "supervisor",
     "state_size_bytes": "supervisor",
-
-    # Metadata Authority (Shared)
-    "task_type": ["competition_intel", "data_engineer", "validation_architect"],
-    "target_col": ["competition_intel", "data_engineer", "validation_architect"],
+    "task_type": ["competition_intel", "data_engineer", "validation_architect", "semantic_router", "supervisor"],
+    "target_col": ["competition_intel", "data_engineer", "validation_architect", "supervisor"],
 
     # Competition Intel
     "competition_brief": "competition_intel",
     "competition_brief_path": "competition_intel",
     "intel_brief_path": "competition_intel",
     "competition_context": "competition_intel",
+    "external_data_manifest": "competition_intel",
 
     # Pre-flight (Shield 6)
     "preflight_passed": "preflight",
@@ -63,7 +62,7 @@ _FIELD_OWNERS = {
     "data_hash": "data_engineer",
     "id_columns": "data_engineer",
     "schema_path": "data_engineer",
-    "preprocessor_path": "feature_factory",
+    "preprocessor_path": ["data_engineer", "feature_factory"],
     "preprocessor_config_path": "data_engineer",
     "canonical_train_rows": "data_engineer",
     "canonical_test_rows": "data_engineer",
@@ -554,6 +553,13 @@ class ProfessorState(BaseModel):
             checkpoint_data["state_schema_version"] = "v2.0"
             return checkpoint_data
         raise SchemaVersionError(f"Unrecognized schema version: {ver}")
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+
+def generate_session_id(competition_name: str) -> str:
+    """Generate a unique session ID: professor_YYYYMMDD_HHMMSS."""
+    now = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return f"professor_{now}"
 
 # ── Initial State (Legacy Compatibility) ───────────────────────────────────
 def initial_state(**kwargs) -> Dict[str, Any]:

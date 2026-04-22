@@ -29,11 +29,9 @@ def with_agent_retry(agent_name: str):
             # ── Bridge: Ensure state is the Pydantic object for attribute access ──
             if not isinstance(state, ProfessorState):
                 # If it's a dict, convert to object
-                # Filter keys to match model fields to avoid ValidationError on legacy keys
                 valid_keys = ProfessorState.model_fields.keys()
                 filtered_data = {k: v for k, v in dict(state).items() if k in valid_keys}
                 
-                # Special handling for config
                 if "config" in filtered_data and isinstance(filtered_data["config"], dict):
                     from core.config import ProfessorConfig
                     filtered_data["config"] = ProfessorConfig(**filtered_data["config"])
@@ -42,6 +40,10 @@ def with_agent_retry(agent_name: str):
                     filtered_data["config"] = ProfessorConfig()
                     
                 state = ProfessorState(**filtered_data)
+
+            # ── Metadata Update: Set current_node (Owned by supervisor/system) ──
+            # We do this as "supervisor" or "system" to avoid OwnershipError
+            state.current_node = agent_name
 
             for attempt in range(1, MAX_INNER_ATTEMPTS + 1):
                 try:

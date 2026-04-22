@@ -138,7 +138,7 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
     
     # 6. Determine metric
     scorer_name = str(brief.get("evaluation_metric", "")).lower().strip()
-    if not scorer_name:
+    if not scorer_name or scorer_name == "unknown":
         if target_type == "binary": scorer_name = "auc"
         elif target_type == "multiclass": scorer_name = "f1_weighted"
         else: scorer_name = "rmse"

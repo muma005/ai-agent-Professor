@@ -93,15 +93,23 @@ def verify_metric(metric_name: str, task_type: str) -> Tuple[bool, str]:
 
 def run_metric_verification_gate(state: Any) -> Any:
     """LangGraph node: Shield 1."""
-    # Import state here to avoid circular dependencies
     from core.state import ProfessorState
     
-    metric_name = state.get("metric_contract", {}).get("metric_name", "unknown")
+    contract = state.get("metric_contract")
+    if not contract:
+        logger.warning("[Shield 1] No metric contract found. Skipping.")
+        return state
+
+    # Support both dict and object
+    if isinstance(contract, dict):
+        scorer_name = contract.get("scorer_name", contract.get("metric_name", "unknown"))
+    else:
+        scorer_name = getattr(contract, "scorer_name", getattr(contract, "metric_name", "unknown"))
+
     task_type = state.get("task_type", "unknown")
+    logger.info(f"[Shield 1] Verifying metric: {scorer_name} for {task_type}")
     
-    logger.info(f"[Shield 1] Verifying metric: {metric_name} for {task_type}")
-    
-    success, message = verify_metric(metric_name, task_type)
+    success, message = verify_metric(scorer_name, task_type)
     
     if not success:
         logger.error(f"[Shield 1] GATE FAILED: {message}")

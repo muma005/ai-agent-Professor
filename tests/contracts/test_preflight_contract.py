@@ -2,56 +2,120 @@
 
 import pytest
 import os
+import json
 import polars as pl
-from shields.preflight import run_preflight_checks, _profile_columns
-from core.state import ProfessorState
+from pathlib import Path
+from core.state import ProfessorState, initial_state
+from shields.preflight import run_preflight_checks
 
-def test_audit_missing_files():
-    """Verify missing files are detected."""
-    state = ProfessorState(
-        raw_data_path="non_existent.csv",
-        test_data_path="missing.csv",
-        sample_submission_path="empty.csv"
-    )
-    
-    new_state = run_preflight_checks(state)
-    assert new_state.preflight_passed is False
-    assert any("File not found" in w for w in new_state.preflight_warnings)
+# ── Fixtures ────────────────────────────────────────────────────────────────
 
-def test_column_profiling(tmp_path):
-    """Verify heuristic detection of column types."""
-    path = tmp_path / "train.csv"
-    df = pl.DataFrame({
-        "text": ["This is a very long text " * 10, "another long one " * 10],
-        "image": ["cat.jpg", "dog.png"],
-        "data": ["{\"a\": 1}", "[1, 2, 3]"],
-        "normal": [1, 2]
+@pytest.fixture
+def clean_tabular_dir(tmp_path):
+    """Standard tabular competition — should pass cleanly."""
+    train = pl.DataFrame({
+        "id": range(100),
+        "age": [25 + i % 50 for i in range(100)],
+        "target": [0, 1] * 50,
     })
-    df.write_csv(path)
+    test = train.drop("target").head(20)
+    sample_sub = pl.DataFrame({"id": range(20), "target": [0.5] * 20})
     
-    profile = _profile_columns(str(path))
-    assert "nlp" in profile
-    assert "image" in profile
-    assert "json" in profile
-    assert "text" in profile["nlp"]
-    assert "image" in profile["image"]
-    assert "data" in profile["json"]
+    train.write_csv(tmp_path / "train.csv")
+    test.write_csv(tmp_path / "test.csv")
+    sample_sub.write_csv(tmp_path / "sample_submission.csv")
+    return tmp_path
 
-def test_preflight_node_pass(tmp_path):
-    """Verify pass when files exist."""
-    train = tmp_path / "train.csv"
-    test = tmp_path / "test.csv"
-    sub = tmp_path / "sub.csv"
-    
-    pl.DataFrame({"a": [1]}).write_csv(train)
-    pl.DataFrame({"a": [1]}).write_csv(test)
-    pl.DataFrame({"a": [1]}).write_csv(sub)
-    
-    state = ProfessorState(
-        raw_data_path=str(train),
-        test_data_path=str(test),
-        sample_submission_path=str(sub)
-    )
-    
-    new_state = run_preflight_checks(state)
-    assert new_state.preflight_passed is True
+@pytest.fixture
+def nlp_heavy_dir(tmp_path):
+    """NLP features detected."""
+    train = pl.DataFrame({
+        "id": range(50),
+        "text": ["This is a very long text string that should trigger the NLP flag for preflight" * 2] * 50
+    })
+    train.write_csv(tmp_path / "train.csv")
+    pl.DataFrame({"id": range(50), "target": [0.5] * 50}).write_csv(tmp_path / "sample_submission.csv")
+    return tmp_path
+
+@pytest.fixture
+def image_path_dir(tmp_path):
+    """Image paths detected."""
+    train = pl.DataFrame({
+        "id": range(20),
+        "img": [f"path/to/image_{i}.jpg" for i in range(20)]
+    })
+    train.write_csv(tmp_path / "train.csv")
+    pl.DataFrame({"id": range(20), "target": [0.5] * 20}).write_csv(tmp_path / "sample_submission.csv")
+    return tmp_path
+
+# ── Tests ───────────────────────────────────────────────────────────────────
+
+class TestPreflightContract:
+    """
+    Contract: Pre-flight Checks (Shield 6)
+    Ensures data profiling, modality detection, and resource checks.
+    """
+
+    def test_clean_tabular_passes(self, clean_tabular_dir):
+        """Verify standard data passes without blockers."""
+        state_dict = initial_state(
+            raw_data_path=str(clean_tabular_dir / "train.csv"),
+            session_id="test-preflight-pass"
+        )
+        state = ProfessorState(**state_dict)
+        
+        final_state = run_preflight_checks(state)
+        assert final_state.preflight_passed is True
+        assert final_state.preflight_data_size_mb > 0
+
+    def test_text_column_flagged(self, nlp_heavy_dir):
+        """Verify long text triggers possible_nlp flag."""
+        state_dict = initial_state(
+            raw_data_path=str(nlp_heavy_dir / "train.csv")
+        )
+        state = ProfessorState(**state_dict)
+        final_state = run_preflight_checks(state)
+        
+        nlp_warnings = [w for w in final_state.preflight_warnings if w["type"] == "possible_nlp"]
+        assert len(nlp_warnings) > 0
+
+    def test_image_paths_flagged(self, image_path_dir):
+        """Verify .jpg strings trigger image modality flag."""
+        state_dict = initial_state(
+            raw_data_path=str(image_path_dir / "train.csv")
+        )
+        state = ProfessorState(**state_dict)
+        final_state = run_preflight_checks(state)
+        
+        assert "image" in final_state.preflight_unsupported_modalities
+
+    def test_submission_json_blocks(self, tmp_path):
+        """Verify JSON submission blocks pipeline."""
+        train = pl.DataFrame({"id": [1], "target": [0]})
+        train.write_csv(tmp_path / "train.csv")
+        
+        with open(tmp_path / "sample_submission.json", "w") as f:
+            json.dump({"test": "data"}, f)
+            
+        state_dict = initial_state(raw_data_path=str(tmp_path / "train.csv"))
+        state = ProfessorState(**state_dict)
+        final_state = run_preflight_checks(state)
+        
+        assert final_state.preflight_passed is False
+        assert final_state.preflight_submission_format["format"] == "json"
+
+    def test_mostly_null_flagged(self, tmp_path):
+        """Verify high null percentage triggers warning."""
+        train = pl.DataFrame({
+            "id": range(100),
+            "mostly_null": [None] * 95 + [1.0] * 5
+        })
+        train.write_csv(tmp_path / "train.csv")
+        pl.DataFrame({"id": [1], "target": [0.5]}).write_csv(tmp_path / "sample_submission.csv")
+        
+        state_dict = initial_state(raw_data_path=str(tmp_path / "train.csv"))
+        state = ProfessorState(**state_dict)
+        final_state = run_preflight_checks(state)
+        
+        null_warnings = [w for w in final_state.preflight_warnings if w["type"] == "mostly_null"]
+        assert len(null_warnings) > 0

@@ -10,8 +10,6 @@ import logging
 import threading
 import traceback
 import functools
-import numpy as np
-import polars as pl
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime, timezone
@@ -32,8 +30,11 @@ from shields.cost_governor import run_cost_governor_check
 # ── Agent Imports ──────────────────────────────────────────────────
 from agents.semantic_router import run_semantic_router
 from agents.competition_intel import run_competition_intel
+from agents.domain_research import run_domain_research
 from agents.data_engineer import run_data_engineer
 from agents.eda_agent import run_eda_agent
+from tools.eda_plots import run_eda_visualizer
+from agents.shift_detector import run_shift_detector
 from agents.validation_architect import run_validation_architect
 from agents.ml_optimizer import run_ml_optimizer
 from agents.red_team_critic import run_red_team_critic
@@ -66,7 +67,6 @@ def route_after_node(state: ProfessorState, node_name: str) -> str:
     dag = state.dag or []
     
     # ── Handle Shield Transition ──
-    # If we are at metric_gate, we find where validation_architect was in the DAG
     if node_name == "metric_gate":
         reference_node = "validation_architect"
     else:
@@ -116,8 +116,11 @@ def build_graph() -> StateGraph:
     # ── Add Agent Nodes ───────────────────────────────────────────
     graph.add_node("semantic_router",      run_semantic_router)
     graph.add_node("competition_intel",    run_competition_intel)
+    graph.add_node("domain_researcher",    run_domain_research)
     graph.add_node("data_engineer",        run_data_engineer)
     graph.add_node("eda_agent",            run_eda_agent)
+    graph.add_node("eda_visualizer",       run_eda_visualizer)
+    graph.add_node("shift_detector",       run_shift_detector)
     graph.add_node("validation_architect", run_validation_architect)
     graph.add_node("feature_factory",      run_feature_factory)
     graph.add_node("ml_optimizer",         run_ml_optimizer)
@@ -139,7 +142,8 @@ def build_graph() -> StateGraph:
         "semantic_router",
         route_after_router,
         {node: node for node in [
-            "competition_intel", "data_engineer", "eda_agent", 
+            "competition_intel", "domain_researcher", "data_engineer", "eda_agent", 
+            "eda_visualizer", "shift_detector",
             "validation_architect", "feature_factory", "ml_optimizer",
             "ensemble_architect", "red_team_critic", "pseudo_label_agent",
             "submission_strategist", "publisher", "qa_gate"
@@ -153,14 +157,16 @@ def build_graph() -> StateGraph:
         return _route
 
     # All nodes follow the DAG except special cases
-    for node in ["competition_intel", "data_engineer", "eda_agent", 
+    for node in ["competition_intel", "domain_researcher", "data_engineer", "eda_agent", 
+                 "eda_visualizer", "shift_detector",
                  "feature_factory", "ml_optimizer", "ensemble_architect",
                  "pseudo_label_agent", "submission_strategist", "publisher"]:
         graph.add_conditional_edges(
             node, 
             _get_router(node), 
             {n: n for n in [
-                "competition_intel", "data_engineer", "eda_agent", 
+                "competition_intel", "domain_researcher", "data_engineer", "eda_agent", 
+                "eda_visualizer", "shift_detector",
                 "validation_architect", "feature_factory", "ml_optimizer",
                 "ensemble_architect", "red_team_critic", "pseudo_label_agent",
                 "submission_strategist", "publisher", "qa_gate"
@@ -173,7 +179,8 @@ def build_graph() -> StateGraph:
         "metric_gate", 
         _get_router("metric_gate"),
         {n: n for n in [
-            "competition_intel", "data_engineer", "eda_agent", 
+            "competition_intel", "domain_researcher", "data_engineer", "eda_agent", 
+            "eda_visualizer", "shift_detector",
             "validation_architect", "feature_factory", "ml_optimizer",
             "ensemble_architect", "red_team_critic", "pseudo_label_agent",
             "submission_strategist", "publisher", "qa_gate"
@@ -185,7 +192,8 @@ def build_graph() -> StateGraph:
         "red_team_critic", 
         route_after_critic,
         {n: n for n in [
-            "supervisor_replan", "competition_intel", "data_engineer", "eda_agent", 
+            "supervisor_replan", "competition_intel", "domain_researcher", "data_engineer", "eda_agent", 
+            "eda_visualizer", "shift_detector",
             "validation_architect", "feature_factory", "ml_optimizer",
             "ensemble_architect", "pseudo_label_agent",
             "submission_strategist", "publisher", "qa_gate"
@@ -197,7 +205,8 @@ def build_graph() -> StateGraph:
         "supervisor_replan", 
         route_after_supervisor_replan,
         {n: n for n in [
-            "competition_intel", "data_engineer", "eda_agent", 
+            "competition_intel", "domain_researcher", "data_engineer", "eda_agent", 
+            "eda_visualizer", "shift_detector",
             "validation_architect", "feature_factory", "ml_optimizer",
             "ensemble_architect", "red_team_critic", "pseudo_label_agent",
             "submission_strategist", "publisher", "qa_gate"

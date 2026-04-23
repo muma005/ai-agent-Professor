@@ -241,12 +241,17 @@ def _print_hitl_banner(prompt: dict) -> None:
 
 def _classify_error(agent_name: str, error: Exception) -> str:
     err_type = type(error).__name__
-    err_repr = repr(type(error)).lower() + repr(error).lower()
+    err_msg = str(error).lower()
+    
+    # 1. Type-based exact match
     if err_type in ERROR_CLASS_MAP:
         return ERROR_CLASS_MAP[err_type]
-    for k, v in ERROR_CLASS_MAP.items():
-        if k.lower() in err_repr:
-            return v
+    
+    # 2. Message-based pattern match (from v2_layer2.md)
+    for pattern, klass in ERROR_CLASS_MAP.items():
+        if pattern.lower() in err_msg:
+            return klass
+            
     return "unknown"
 
 def _build_interventions(state: ProfessorState, agent_name: str, error_class: str, error: Exception) -> list:

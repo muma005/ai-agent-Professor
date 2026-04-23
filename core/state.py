@@ -307,11 +307,11 @@ class ProfessorState(BaseModel):
     # Feature Factory
     feature_manifest: Optional[Dict] = None
     feature_candidates: Optional[List] = None
-    round1_features: Optional[List] = None
-    round2_features: Optional[List] = None
-    round3_features: Optional[List] = None
-    round4_features: Optional[List] = None
-    round5_features: Optional[List] = None
+    round1_features: Optional[str] = None
+    round2_features: Optional[str] = None
+    round3_features: Optional[str] = None
+    round4_features: Optional[str] = None
+    round5_features: Optional[str] = None
     feature_factory_checkpoint: Optional[Dict] = None
     feature_order: List = Field(default_factory=list)
     feature_data_path: Optional[str] = None

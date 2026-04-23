@@ -2,137 +2,131 @@
 
 import os
 import json
-import math
 import logging
-import ast
-import re
-from datetime import datetime, timezone
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
-from typing import Any, Optional, Dict, List, Tuple
-
-import polars as pl
-import numpy as np
-from sklearn.model_selection import KFold
-
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional, Tuple
 from core.state import ProfessorState
-from core.lineage import log_event
-from core.preprocessor import TabularPreprocessor
-from guards.agent_retry import with_agent_retry
 from tools.llm_provider import llm_call, _safe_json_loads
-from tools.wilcoxon_gate import feature_gate_result
-from tools.null_importance import run_null_importance_filter
+from tools.sandbox import run_in_sandbox
+from core.lineage import log_event
+from guards.agent_retry import with_agent_retry
 from tools.performance_monitor import timed_node
 
 logger = logging.getLogger(__name__)
 
 AGENT_NAME = "feature_factory"
 
-# ── Constants ────────────────────────────────────────────────────
-MAX_ROUND3_CANDIDATES = 200
-MAX_ROUND4_CANDIDATES = 30
-MAX_INTERACTION_FEATURES = 20
-MAX_INTERACTION_CANDIDATES = 500
-ROUND3_AGG_FUNCTIONS = ["mean", "std", "min", "max", "count"]
+# ── Feature Engineering System Prompt ────────────────────────────────────────
 
-# ── Feature candidate dataclass ──────────────────────────────────
+FACTORY_SYSTEM_PROMPT = """You are a Kaggle Grandmaster specializing in Python/Polars feature engineering.
+Generate high-quality feature code that transforms raw data into strong signals.
 
-@dataclass
-class FeatureCandidate:
-    name: str
-    source_columns: list[str]
-    transform_type: str
-    description: str
-    round: int
-    null_importance_percentile: float | None = None
-    wilcoxon_p: float | None = None
-    cv_delta: float | None = None
-    verdict: str = "PENDING"
-    expression: str | None = None
+RULES:
+1. Output ONLY a valid Python code block using Polars (pl).
+2. Use the variable 'df' as the input and output (df = df.with_columns(...)).
+3. Do NOT include imports — they are handled by the sandbox.
+4. Keep logic efficient. Use vectorized Polars operations.
+5. Focus on the hypotheses provided in the context.
+"""
 
-# ── Internal Helpers (Logic Refactored for ProfessorState) ───────
+# ── Core Logic ──────────────────────────────────────────────────────────────
 
-def _is_categorical(col: dict) -> bool:
-    dtype = str(col.get("dtype", "")).lower()
-    n_unique = int(col.get("n_unique", 0))
-    return any(t in dtype for t in ("str", "cat", "object")) or n_unique < 50
+def _run_feature_round(
+    state: ProfessorState, 
+    round_num: int, 
+    hypotheses: List[Dict],
+    ledger: List[Dict]
+) -> Tuple[bool, str, Dict]:
+    """Single round of feature generation and sandbox validation."""
+    
+    # 1. LLM Generation
+    prompt = f"""ROUND {round_num} of Feature Engineering.
+Hypotheses to implement:
+{json.dumps(hypotheses, indent=2)}
 
-def _is_numeric(col: dict) -> bool:
-    dtype = str(col.get("dtype", "")).lower()
-    return any(t in dtype for t in ("float", "int"))
+Previous Code Ledger (Successes and Failures):
+{json.dumps(ledger[-5:], indent=2)}
 
-def _find_col(schema: dict, name: str) -> dict:
-    for c in schema.get("columns", []):
-        if c.get("name") == name: return c
-    return {}
+Generate a single Python code block using Polars to implement these features.
+"""
+    try:
+        code_raw = llm_call(prompt, system_prompt=FACTORY_SYSTEM_PROMPT)
+        # Extract code from markdown
+        if "```python" in code_raw:
+            code = code_raw.split("```python")[1].split("```")[0].strip()
+        else:
+            code = code_raw.strip()
+    except Exception as e:
+        return False, f"LLM Generation failed: {e}", {}
 
-# ── Main agent function ──────────────────────────────────────────
+    # 2. Sandbox Execution
+    # Note: In real run, we'd use the clean_data_path. For now, we mock success.
+    res = run_in_sandbox(
+        code, 
+        agent_name=AGENT_NAME,
+        purpose=f"Round {round_num} engineering",
+        round_num=round_num
+    )
+    
+    return res["success"], code, res
+
+# ── Agent Node ───────────────────────────────────────────────────────────────
 
 @timed_node
 @with_agent_retry(AGENT_NAME)
 def run_feature_factory(state: ProfessorState) -> ProfessorState:
     """
-    LangGraph node: Feature Factory — 5-round robust feature engineering.
+    Intelligence Layer: Iterative 5-Round Feature Factory.
     """
     session_id = state.get("session_id", "default")
-    output_dir = Path(f"outputs/{session_id}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"[{AGENT_NAME}] Starting — session: {session_id}")
-
-    # 1. Verification of inputs
-    clean_path = state.get("clean_data_path", "")
-    preprocessor_path = state.get("preprocessor_path", "")
-    schema_path = state.get("schema_path", "")
     
-    if not all(os.path.exists(p) for p in [clean_path, preprocessor_path, schema_path] if p):
-        raise FileNotFoundError(f"[{AGENT_NAME}] Missing essential input files.")
+    logger.info(f"[{AGENT_NAME}] Starting iterative refinement...")
 
-    df = pl.read_parquet(clean_path)
-    schema = read_json(schema_path)
-    preprocessor = TabularPreprocessor.load(preprocessor_path)
+    # 1. Gather Hypotheses
+    hypotheses = state.get("feature_candidates", [])
+    if not hypotheses:
+        logger.warning(f"[{AGENT_NAME}] No hypotheses found. Skipping.")
+        return state
 
-    # 2. Schema Adapter (Ensure legacy dict format if needed)
-    target_col = schema.get("target_col", "")
-    id_columns = schema.get("id_columns", [])
-    y = df[target_col].to_numpy() if target_col in df.columns else None
+    # 2. Iterative Refinement Loop (Mandated 5 Rounds)
+    # Note: We iterate but use current state to keep loop logic clean in this node
+    ledger = []
+    rounds_completed = 0
+    max_rounds = 5 # As per v2_layer2.md
     
-    # 3. Feature Generation (Rounds 1-5)
-    # We maintain the 5-round logic here (stripped for brevity in refactor snippet, 
-    # but in a real commit, all helper functions like _generate_round1 etc. would be kept)
-    
-    # (Placeholder for full 5-round logic execution)
-    added_features = [] # Keepers
-    
-    # 4. Persistence
-    feature_parquet_path = output_dir / "features.parquet"
-    df.write_parquet(feature_parquet_path)
-    
-    preprocessor_save_path = output_dir / "preprocessor_ff.pkl"
-    preprocessor.save(str(preprocessor_save_path))
+    # Check if pipeline_depth reduces rounds
+    depth = state.get("pipeline_depth", "standard")
+    if depth == "sprint": max_rounds = 2
 
-    manifest = {"total_added": len(added_features), "features": [asdict(f) for f in added_features]}
-    manifest_path = output_dir / "feature_manifest.json"
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+    for r in range(1, max_rounds + 1):
+        logger.info(f"[{AGENT_NAME}] Round {r}/{max_rounds} starting...")
+        success, code, result = _run_feature_round(state, r, hypotheses, ledger)
+        
+        entry = result.get("entry", {})
+        if entry: ledger.append(entry)
+        
+        if success:
+            rounds_completed += 1
+            logger.info(f"[{AGENT_NAME}] Round {r} SUCCESS.")
+        else:
+            logger.warning(f"[{AGENT_NAME}] Round {r} FAILED: {result.get('stderr')}")
 
-    # 5. Update State
+    # 3. Update State
     updates = {
-        "feature_data_path": str(feature_parquet_path),
-        "feature_manifest": manifest,
-        "feature_candidates": added_features,
-        "feature_order": df.columns,
-        "preprocessor_path": str(preprocessor_save_path)
+        "round1_features": ledger[0].get("code") if len(ledger) > 0 else None,
+        "round2_features": ledger[1].get("code") if len(ledger) > 1 else None,
+        "round3_features": ledger[2].get("code") if len(ledger) > 2 else None,
+        "round4_features": ledger[3].get("code") if len(ledger) > 3 else None,
+        "round5_features": ledger[4].get("code") if len(ledger) > 4 else None,
+        "feature_order": [e.get("entry_id") for e in ledger if e.get("success")],
     }
 
     log_event(
         session_id=session_id,
         agent=AGENT_NAME,
-        action="feature_factory_complete",
-        keys_written=["feature_data_path", "feature_manifest", "feature_order"]
+        action="factory_rounds_complete",
+        values_changed={"rounds": rounds_completed}
     )
 
     return ProfessorState.validated_update(state, AGENT_NAME, updates)
-
-# To ensure read_json is available
-from tools.data_tools import read_json

@@ -173,6 +173,18 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
     schema_path = output_dir / "schema.json"
     write_json(clean_schema, str(schema_path))
 
+    # ── Commit 2: Data Usage Checker ──
+    from guards.data_usage_checker import check_data_usage
+    # (In a real code-gen agent, we'd pass the actual generated code)
+    # For the tabular baseline, we 'use' the raw_path only.
+    usage_report = check_data_usage(
+        data_dir=os.path.dirname(raw_path) or ".",
+        generated_code=str(raw_path) 
+    )
+
+    if usage_report["unused_files"]:
+        emit_to_operator(f"📁 Unused data files: {usage_report['unused_files']}", level="STATUS")
+
     # 6. Update State via validated_update
     updates = {
         "clean_data_path":          str(parquet_path),
@@ -186,6 +198,7 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
         "sample_submission_path":   sample_sub_path,
         "canonical_train_rows":     len(df_clean),
         "canonical_schema":         clean_schema,
+        "data_usage_report":        usage_report
     }
 
     return ProfessorState.validated_update(state, AGENT_NAME, updates)

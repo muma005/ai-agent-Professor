@@ -62,6 +62,7 @@ _FIELD_OWNERS = {
     "raw_data_path": "data_engineer",
     "test_data_path": "data_engineer",
     "sample_submission_path": "data_engineer",
+    "data_usage_report": "data_engineer",
     "clean_data_path": "data_engineer",
     "data_hash": "data_engineer",
     "id_columns": "data_engineer",

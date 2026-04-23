@@ -42,6 +42,10 @@ _FIELD_OWNERS = {
     "state_size_bytes": "supervisor",
     "task_type": ["competition_intel", "data_engineer", "validation_architect", "semantic_router", "supervisor"],
     "target_col": ["competition_intel", "data_engineer", "validation_architect", "supervisor"],
+    "pipeline_depth": "preflight",
+    "pipeline_depth_auto_detected": "preflight",
+    "pipeline_depth_reason": "preflight",
+    "agents_skipped": ["preflight", "supervisor"],
 
     # Competition Intel
     "competition_brief": "competition_intel",
@@ -239,6 +243,10 @@ class ProfessorState(BaseModel):
     pipeline_halt_reason: str = ""
     state_schema_version: str = "v2.0"
     state_size_bytes: int = 0
+    pipeline_depth: str = "standard"
+    pipeline_depth_auto_detected: bool = True
+    pipeline_depth_reason: str = ""
+    agents_skipped: List = Field(default_factory=list)
 
     # Competition Intel
     competition_brief: Dict = Field(default_factory=dict)
@@ -246,6 +254,11 @@ class ProfessorState(BaseModel):
     intel_brief_path: str = ""
     competition_context: Dict = Field(default_factory=dict)
     task_type: str = "unknown"
+    shift_report: Dict = Field(default_factory=dict)
+    shift_report_path: str = ""
+    shift_severity: str = "unchecked"     # "unchecked" | "clean" | "mild" | "severe"
+    shifted_features: List = Field(default_factory=list)
+    sample_weights_path: str = ""
     adversarial_auc: float = 0.5
     drift_report: Dict = Field(default_factory=dict)
     drift_report_path: str = ""

@@ -240,8 +240,11 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     X, y, feature_names = _prepare_features(df, state.get("target_col", df.columns[-1]), state)
     
     contract_data = state.get("metric_contract")
-    if isinstance(contract_data, dict):
-        contract = MetricContract(**{k:v for k,v in contract_data.items() if k != "scorer_fn"})
+    if isinstance(contract_data, dict) and contract_data.get("scorer_name"):
+        contract = build_metric_contract(
+            scorer_name=contract_data["scorer_name"],
+            task_type=state.get("task_type", "classification")
+        )
     else:
         contract = default_contract()
 

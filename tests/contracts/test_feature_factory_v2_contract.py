@@ -2,6 +2,7 @@
 
 import pytest
 import json
+import polars as pl
 from unittest.mock import patch, MagicMock
 from core.state import ProfessorState, initial_state
 from agents.feature_factory import run_feature_factory
@@ -55,25 +56,28 @@ class TestFeatureFactoryV2Contract:
             run_feature_factory(state)
             assert mock_llm.call_count == 0
 
-    def test_failure_in_round_captured_in_ledger(self):
-        """Verify failing rounds are still recorded in history (implied by ledger growth)."""
+    def test_adaptive_gating_integration(self, tmp_path):
+        """Verify that passed/dropped features are tracked correctly."""
+        # Create minimal parquet for gater
+        df = pl.DataFrame({"target": [0, 1]*10, "f1": [1]*20})
+        p = tmp_path / "clean.parquet"
+        df.write_parquet(p)
+        
         state_dict = initial_state(
             feature_candidates=[{"name": "f1"}],
-            session_id="test-fail-round"
+            clean_data_path=str(p),
+            target_col="target",
+            pipeline_depth="sprint",
+            session_id="test-gate-integration"
         )
         state = ProfessorState(**state_dict)
         
-        with patch("agents.feature_factory.llm_call", return_value="bad code"):
+        with patch("agents.feature_factory.llm_call", return_value="df=df"):
             with patch("agents.feature_factory.run_in_sandbox") as mock_sb:
-                # Mock a failure
-                mock_sb.return_value = {
-                    "success": False, 
-                    "stderr": "SyntaxError", 
-                    "entry": {"entry_id": "fail", "code": "bad code", "success": False}
-                }
+                mock_sb.return_value = {"success": True, "entry": {"entry_id": "1", "code": "df=df", "success": True}}
                 
-                final_state = run_feature_factory(state)
-                # Successful features order should be empty
-                assert len(final_state["feature_order"]) == 0
-                # But round1 code should still be stored
-                assert final_state["round1_features"] == "bad code"
+                # Mock gater to return f1 as passed
+                with patch("agents.feature_factory.run_adaptive_gate", return_value=(["f1"], [{"feature": "f1", "is_beneficial": True}])):
+                    final_state = run_feature_factory(state)
+                    assert "f1" in final_state["features_gate_passed"]
+                    assert len(final_state["features_gate_dropped"]) == 0

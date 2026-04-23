@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from core.state import ProfessorState
 from tools.llm_provider import llm_call, _safe_json_loads
 from tools.sandbox import run_in_sandbox
+from tools.adaptive_gater import run_adaptive_gate
 from core.lineage import log_event
 from guards.agent_retry import with_agent_retry
 from tools.performance_monitor import timed_node
@@ -107,12 +108,30 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         if entry: ledger.append(entry)
         
         if success:
+            # ── Commit 6: Adaptive Gating ──
+            # Extract new feature names from entry metadata or column names (simplified)
+            # For baseline, we assume the code implemented the hypothesis names
+            hypo_names = [h["name"] for h in hypotheses]
+            passed, gate_reports = run_adaptive_gate(state, hypo_names)
+            
+            entry["gate_reports"] = gate_reports
+            entry["passed_gate"] = passed
+            
             rounds_completed += 1
-            logger.info(f"[{AGENT_NAME}] Round {r} SUCCESS.")
+            logger.info(f"[{AGENT_NAME}] Round {r} SUCCESS. Passed gate: {passed}")
         else:
             logger.warning(f"[{AGENT_NAME}] Round {r} FAILED: {result.get('stderr')}")
 
     # 3. Update State
+    all_passed = []
+    all_dropped = []
+    for e in ledger:
+        all_passed.extend(e.get("passed_gate", []))
+        # Reports that failed the threshold
+        for report in e.get("gate_reports", []):
+            if not report["is_beneficial"]:
+                all_dropped.append(report["feature"])
+
     updates = {
         "round1_features": ledger[0].get("code") if len(ledger) > 0 else None,
         "round2_features": ledger[1].get("code") if len(ledger) > 1 else None,
@@ -120,6 +139,8 @@ def run_feature_factory(state: ProfessorState) -> ProfessorState:
         "round4_features": ledger[3].get("code") if len(ledger) > 3 else None,
         "round5_features": ledger[4].get("code") if len(ledger) > 4 else None,
         "feature_order": [e.get("entry_id") for e in ledger if e.get("success")],
+        "features_gate_passed": list(set(all_passed)),
+        "features_gate_dropped": list(set(all_dropped))
     }
 
     log_event(

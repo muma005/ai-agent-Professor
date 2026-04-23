@@ -82,8 +82,8 @@ _FIELD_OWNERS = {
     "dropped_features": "eda_agent",
 
     # Feature Factory
-    "feature_manifest": "feature_factory",
-    "feature_candidates": "feature_factory",
+    "feature_manifest": ["feature_factory", "creative_hypothesis"],
+    "feature_candidates": ["feature_factory", "creative_hypothesis"],
     "round1_features": "feature_factory",
     "round2_features": "feature_factory",
     "round3_features": "feature_factory",

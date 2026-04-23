@@ -166,6 +166,31 @@ def run_in_sandbox(
 ) -> dict:
     """Executes code with 4-layer self-debugging."""
     
+    # ── Commit 1: Pre-Execution Leakage Check ──
+    LEAKAGE_CHECK_AGENTS = {"data_engineer", "feature_factory", "ml_optimizer", 
+                             "creative_hypothesis", "post_processor"}
+
+    if agent_name in LEAKAGE_CHECK_AGENTS:
+        from guards.leakage_precheck import check_code_for_leakage
+        leakage = check_code_for_leakage(code)
+        if leakage["leakage_detected"]:
+            # Do NOT execute the code. Return as failure.
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": (
+                    f"PRE-EXECUTION LEAKAGE DETECTED: {leakage['description']}\n"
+                    f"Line {leakage['line']}: {leakage['code_line']}\n"
+                    f"Fix: {leakage['fix_suggestion']}\n"
+                    f"Code was NOT executed to prevent wasted compute."
+                ),
+                "runtime": 0.0,
+                "entry_id": f"blocked_{int(time.time())}",
+                "diagnostics": {"leakage_precheck": leakage},
+                "integrity_ok": True,
+                "pre_execution_blocked": True,
+            }
+
     if working_dir:
         os.makedirs(working_dir, exist_ok=True)
     

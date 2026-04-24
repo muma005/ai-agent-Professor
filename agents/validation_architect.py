@@ -156,6 +156,18 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
     from tools.gate_config import get_gate_config
     n_rows = state.get("canonical_train_rows", 0)
     gate_config = get_gate_config(n_rows)
+    
+    n_splits = gate_config.get("cv_folds", 5)
+    
+    # Safety bound n_splits for classification
+    if task_type in ("binary", "multiclass"):
+        clean_path = state.get("clean_data_path")
+        if clean_path and os.path.exists(clean_path):
+            df = pl.read_parquet(clean_path)
+            target_series = df[target_col].drop_nulls()
+            min_class_count = target_series.value_counts().select("count").min().item()
+            if min_class_count and min_class_count > 0:
+                n_splits = max(2, min(n_splits, min_class_count))
 
     # 8. Build and save validation strategy
     validation_strategy = {

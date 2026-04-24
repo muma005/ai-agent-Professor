@@ -34,6 +34,7 @@ def run_v2_smoke_test():
         "eda_agent",
         "validation_architect",
         "ml_optimizer",
+        "ensemble_architect",
         "submission_strategist"
     ]
 
@@ -50,7 +51,7 @@ def run_v2_smoke_test():
 
     try:
         # 4. Run Pipeline
-        final_state = run_professor(initial_state, timeout_seconds=300)
+        final_state = run_professor(initial_state, timeout_seconds=900)
         
         # 5. Verify Outputs
         logger.info("✅ Pipeline Run Completed.")

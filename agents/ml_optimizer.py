@@ -469,6 +469,9 @@ def run_ml_optimizer(state: ProfessorState) -> ProfessorState:
     elif pipeline_depth == "marathon": n_trials = 200
     else: n_trials = 100
 
+    # Fast track for smoke tests
+    if len(train_df) <= 100: n_trials = 2
+
     model_families = ["lightgbm", "xgboost", "catboost"]
     model_configs = []
     

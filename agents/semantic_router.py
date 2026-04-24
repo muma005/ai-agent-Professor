@@ -40,6 +40,7 @@ def run_semantic_router(state: ProfessorState) -> ProfessorState:
         "validation_architect",
         "feature_factory",
         "ml_optimizer",
+        "ensemble_architect",
         "red_team_critic",
         "submission_strategist"
     ]

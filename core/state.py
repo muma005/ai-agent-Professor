@@ -110,6 +110,10 @@ _FIELD_OWNERS = {
     # ML Optimizer
     "cv_scores": "ml_optimizer",
     "cv_mean": "ml_optimizer",
+    "cv_std": "ml_optimizer",
+    "model_configs": "ml_optimizer",
+    "best_model_type": "ml_optimizer",
+    "optuna_trials_completed": "ml_optimizer",
     "model_registry": "ml_optimizer",
     "best_params": "ml_optimizer",
     "optuna_study_path": "ml_optimizer",
@@ -332,6 +336,10 @@ class ProfessorState(BaseModel):
     # Model
     cv_scores: Optional[List] = None
     cv_mean: Optional[float] = None
+    cv_std: float = 0.0
+    model_configs: List = Field(default_factory=list)
+    best_model_type: str = ""
+    optuna_trials_completed: int = 0
     model_registry: List = Field(default_factory=list)
     best_params: Optional[Dict] = None
     optuna_study_path: Optional[str] = None

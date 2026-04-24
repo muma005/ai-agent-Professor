@@ -16,29 +16,33 @@ def evaluate_feature_performance(
     feature_name: str,
     task_type: str = "classification",
     n_estimators: int = 50,
+    gate_config: dict = None,
 ) -> Dict[str, Any]:
     """
-    Train with and without the feature to measure exact gain.
+    Train with and without the feature to measure exact gain using Wilcoxon signed-rank test.
     """
     import lightgbm as lgb
     from sklearn.model_selection import StratifiedKFold, KFold
     from sklearn.metrics import roc_auc_score, mean_squared_error
+    from scipy.stats import wilcoxon
+
+    gate_config = gate_config or {}
+    wilcoxon_p_threshold = gate_config.get("wilcoxon_p", 0.05)
+    cv_folds = gate_config.get("cv_folds", 5)
 
     # 1. Prepare base and full sets
     other_cols = [c for c in df.columns if c != target_col and c != feature_name]
     
-    # 2. Fast 3-fold CV
-    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42) if task_type != "regression" else KFold(n_splits=3, shuffle=True, random_state=42)
+    # 2. Fast CV
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42) if task_type != "regression" else KFold(n_splits=cv_folds, shuffle=True, random_state=42)
     
-    def get_score(cols):
+    def get_fold_scores(cols):
         if not cols:
-            # Baseline for empty feature set: dummy mean prediction
             y = df[target_col].to_numpy()
             if task_type == "regression":
-                return -mean_squared_error(y, np.full_like(y, np.mean(y)))
+                return [-mean_squared_error(y, np.full_like(y, np.mean(y)))] * cv_folds
             else:
-                # 0.5 AUC for random/mean classifier
-                return 0.5
+                return [0.5] * cv_folds
 
         X = df.select(cols).to_numpy()
         y = df[target_col].to_numpy()
@@ -57,19 +61,36 @@ def evaluate_feature_performance(
                 model.fit(X_tr, y_tr)
                 probs = model.predict_proba(X_val)[:, 1]
                 scores.append(roc_auc_score(y_val, probs))
-        return np.mean(scores)
+        return scores
 
-    score_base = get_score(other_cols)
-    score_full = get_score(other_cols + [feature_name])
+    scores_base = get_fold_scores(other_cols)
+    scores_full = get_fold_scores(other_cols + [feature_name])
     
-    improvement = score_full - score_base
+    mean_base = float(np.mean(scores_base))
+    mean_full = float(np.mean(scores_full))
+    improvement = mean_full - mean_base
+    
+    is_beneficial = False
+    wilcoxon_p = 1.0
+    
+    if improvement > 0:
+        try:
+            # alternative="greater" means we test if full > base
+            _, wilcoxon_p = wilcoxon(scores_full, scores_base, alternative="greater")
+            if wilcoxon_p < wilcoxon_p_threshold:
+                is_beneficial = True
+        except ValueError:
+            # Raised if all differences are zero
+            wilcoxon_p = 1.0
+            is_beneficial = False
     
     return {
         "feature": feature_name,
-        "base_score": float(score_base),
-        "full_score": float(score_full),
-        "improvement": float(improvement),
-        "is_beneficial": bool(improvement > 0.0005) # Cast to native bool
+        "base_score": mean_base,
+        "full_score": mean_full,
+        "improvement": improvement,
+        "wilcoxon_p": float(wilcoxon_p),
+        "is_beneficial": is_beneficial
     }
 
 def run_adaptive_gate(state: ProfessorState, features_to_test: List[str]) -> Tuple[List[str], List[Dict]]:
@@ -79,6 +100,7 @@ def run_adaptive_gate(state: ProfessorState, features_to_test: List[str]) -> Tup
     clean_path = state.get("clean_data_path")
     target_col = state.get("target_col")
     task_type = state.get("task_type", "classification")
+    gate_config = state.get("gate_config", {})
     
     if not clean_path or not os.path.exists(clean_path):
         return features_to_test, []
@@ -95,7 +117,7 @@ def run_adaptive_gate(state: ProfessorState, features_to_test: List[str]) -> Tup
     
     for feat in features_to_test:
         if feat not in df.columns: continue
-        res = evaluate_feature_performance(df, target_col, feat, task_type)
+        res = evaluate_feature_performance(df, target_col, feat, task_type, gate_config=gate_config)
         reports.append(res)
         if res["is_beneficial"]:
             passed.append(feat)

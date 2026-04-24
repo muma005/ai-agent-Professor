@@ -152,6 +152,11 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
     contract_path = output_dir / "metric_contract.json"
     save_contract(contract, str(contract_path))
 
+    # 7b. Generate Gate Config
+    from tools.gate_config import get_gate_config
+    n_rows = state.get("canonical_train_rows", 0)
+    gate_config = get_gate_config(n_rows)
+
     # 8. Build and save validation strategy
     validation_strategy = {
         "cv_type":          cv_type,
@@ -185,6 +190,7 @@ def run_validation_architect(state: ProfessorState) -> ProfessorState:
         "validation_strategy":      validation_strategy,
         "validation_strategy_path": str(strategy_path),
         "metric_contract":          contract_dict,
+        "gate_config":              gate_config,
         "task_type":                task_type,
         "hitl_required":            mismatch_reason is not None,
     }

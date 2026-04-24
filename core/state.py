@@ -103,6 +103,7 @@ _FIELD_OWNERS = {
     "metric_contract_path": "validation_architect",
     "cv_strategy": "validation_architect",
     "metric_contract": "validation_architect",
+    "gate_config": "validation_architect",
     "hitl_required": ["validation_architect", "hitl_listener"],
     "hitl_reason": ["validation_architect", "hitl_listener"],
 
@@ -326,6 +327,7 @@ class ProfessorState(BaseModel):
     metric_contract_path: str = ""
     cv_strategy: Optional[Dict] = None
     metric_contract: Optional[Dict] = None
+    gate_config: Dict = Field(default_factory=dict)
 
     # Model
     cv_scores: Optional[List] = None

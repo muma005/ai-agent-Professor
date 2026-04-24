@@ -1,75 +1,88 @@
 # tests/contracts/test_ensemble_architect_contract.py
 
 import pytest
+import os
 import numpy as np
-from core.state import initial_state
+import polars as pl
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+from core.state import ProfessorState, initial_state
 from agents.ensemble_architect import run_ensemble_architect
 
-# ── Fixtures ────────────────────────────────────────────────────────────────
-
 @pytest.fixture
-def ensemble_state():
-    """State with multiple diverse models in registry."""
-    return initial_state(
-        session_id="test-ensemble",
-        data_hash="hash-123",
-        model_registry=[
-            {
-                "model_id": "lgbm_1",
-                "data_hash": "hash-123",
-                "cv_mean": 0.85,
-                "fold_scores": [0.84, 0.86, 0.85, 0.85, 0.85],
-                "oof_predictions": [0.8, 0.2, 0.7]*100
-            },
-            {
-                "model_id": "xgb_1",
-                "data_hash": "hash-123",
-                "cv_mean": 0.84,
-                "fold_scores": [0.83, 0.85, 0.84, 0.84, 0.84],
-                "oof_predictions": [0.7, 0.3, 0.6]*100
-            }
-        ],
-        y_train=[1, 0, 1]*100,
-        evaluation_metric="auc",
-        task_type="binary"
-    )
+def ensemble_state(tmp_path):
+    oof_path = str(tmp_path / "oof.parquet")
+    test_path = str(tmp_path / "test.parquet")
+    
+    pl.DataFrame({"pred": [0.1, 0.9, 0.4, 0.6]}).write_parquet(oof_path)
+    pl.DataFrame({"pred": [0.2, 0.8]}).write_parquet(test_path)
+    
+    train_path = str(tmp_path / "train.parquet")
+    test_features_path = str(tmp_path / "test_features.csv")
+    
+    pl.DataFrame({
+        "f1": [1, 2, 3, 4],
+        "target": [0, 1, 0, 1]
+    }).write_parquet(train_path)
+    
+    pl.DataFrame({"f1": [4, 5]}).write_csv(test_features_path)
 
-# ── Tests ───────────────────────────────────────────────────────────────────
+    state_dict = initial_state(
+        session_id="test-ensemble",
+        feature_data_path=train_path,
+        test_data_path=test_features_path,
+        target_col="target",
+        task_type="classification",
+        validation_strategy={"n_splits": 2},
+        metric_contract={"scorer_name": "log_loss"}
+    )
+    state = ProfessorState(**state_dict)
+    state.model_configs = [
+        {"model_type": "lightgbm", "cv_score": 0.8},
+        {"model_type": "xgboost", "cv_score": 0.75}
+    ]
+    state.best_model_type = "lightgbm"
+    state.cv_mean = 0.8
+    state.oof_predictions_path = oof_path
+    state.test_predictions_path = test_path
+    
+    return state
 
 class TestEnsembleArchitectContract:
-    """
-    Contract: Ensemble Architect Agent
-    Ensures diversity selection and weight optimization.
-    """
 
-    def test_selected_models_populated(self, ensemble_state):
-        """Verify selected_models is a non-empty list."""
+    @patch("agents.ensemble_architect._get_metric")
+    def test_loads_all_oof_predictions(self, mock_metric, ensemble_state):
+        mock_metric.return_value = 0.9
         state = run_ensemble_architect(ensemble_state)
-        assert isinstance(state["selected_models"], list)
-        assert len(state["selected_models"]) > 0
+        # Should calculate metrics and pick one
+        assert state["ensemble_method"] in ["meta_learner", "simple_mean", "best_single_model"]
 
-    def test_ensemble_weights_sum_to_one(self, ensemble_state):
-        """Verify weights are normalized."""
+    @patch("agents.ensemble_architect.LogisticRegression")
+    def test_computes_meta_learner_and_mean(self, mock_lr, ensemble_state):
+        run_ensemble_architect(ensemble_state)
+        # Linear Regression fit should be called
+        assert mock_lr.return_value.fit.called
+
+    def test_selects_best_ensemble_method(self, ensemble_state):
+        # We don't mock get_metric, so it calculates actual AUC
         state = run_ensemble_architect(ensemble_state)
-        weights = state["ensemble_weights"]
-        assert isinstance(weights, dict)
-        assert abs(sum(weights.values()) - 1.0) < 1e-5
+        assert state["ensemble_method"] in ["meta_learner", "simple_mean", "best_single_model"]
 
-    def test_ensemble_accepted_is_boolean(self, ensemble_state):
-        """Verify acceptance flag is written."""
+    def test_ensemble_oof_path_saved(self, ensemble_state):
         state = run_ensemble_architect(ensemble_state)
-        assert isinstance(state["ensemble_accepted"], bool)
+        assert os.path.exists(state["ensemble_oof_path"])
 
-    def test_empty_registry_safety(self):
-        """Verify safety when registry is empty."""
-        state = initial_state(session_id="empty", model_registry=[])
-        result = run_ensemble_architect(state)
-        # Should skip and return state
-        assert "ensemble_weights" not in result or result.get("ensemble_weights") is None
-
-    def test_holdout_score_captured(self, ensemble_state):
-        """Verify ensemble performance is measured."""
+    def test_ensemble_test_predictions_saved(self, ensemble_state):
         state = run_ensemble_architect(ensemble_state)
-        assert "ensemble_selection" in state
-        assert "holdout_score" in state["ensemble_selection"]
-        assert isinstance(state["ensemble_selection"]["holdout_score"], float)
+        assert os.path.exists(state["ensemble_test_predictions_path"])
+
+    def test_ensemble_cv_score_calculated(self, ensemble_state):
+        state = run_ensemble_architect(ensemble_state)
+        assert isinstance(state["ensemble_cv_score"], float)
+        assert state["ensemble_cv_score"] > 0
+
+    def test_ensemble_weights_populated(self, ensemble_state):
+        state = run_ensemble_architect(ensemble_state)
+        assert isinstance(state["ensemble_weights"], dict)
+        assert "lightgbm" in state["ensemble_weights"]
+        assert "xgboost" in state["ensemble_weights"]

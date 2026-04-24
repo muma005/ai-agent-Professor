@@ -154,6 +154,11 @@ _FIELD_OWNERS = {
     "ensemble_weights": "ensemble_architect",
     "ensemble_oof": "ensemble_architect",
     "prize_candidates": "ensemble_architect",
+    "ensemble_cv_score": "ensemble_architect",
+    "ensemble_oof_path": "ensemble_architect",
+    "ensemble_test_predictions_path": "ensemble_architect",
+    "ensemble_method": "ensemble_architect",
+    "meta_learner_used": "ensemble_architect",
 
     # Submission Strategist
     "submission_path": "submission_strategist",
@@ -397,6 +402,10 @@ class ProfessorState(BaseModel):
     models_pruned_diversity: List = Field(default_factory=list)
     meta_learner_used: bool = False
     prize_candidates: Optional[List] = None
+    ensemble_cv_score: float = 0.0
+    ensemble_oof_path: str = ""
+    ensemble_test_predictions_path: str = ""
+    ensemble_method: str = ""
 
     # Submission
     submission_path: Optional[str] = None

@@ -137,6 +137,12 @@ _FIELD_OWNERS = {
     # Problem Reframer
     "reframe_details": "problem_reframer",
 
+    # Pseudo Label
+    "pseudo_label_activated": "pseudo_label",
+    "pseudo_label_fraction": "pseudo_label",
+    "pseudo_label_cv_delta": "pseudo_label",
+    "clean_train_with_pseudo_path": "pseudo_label",
+
     # Supervisor Replan
     "features_dropped": "supervisor",
 
@@ -163,6 +169,13 @@ _FIELD_OWNERS = {
     # Submission Strategist
     "submission_path": "submission_strategist",
     "submission_log": "submission_strategist",
+    "submission_a_path": "submission_strategist",
+    "submission_b_path": "submission_strategist",
+    "submission_a_model": "submission_strategist",
+    "submission_b_model": "submission_strategist",
+    "submission_b_correlation_with_a": "submission_safety",
+    "submission_log_path": "publisher",
+    "submission_safety_report": "submission_safety",
 
     # Circuit Breaker & Cost Governor
     "current_node_failure_count": "cost_governor",
@@ -288,6 +301,7 @@ class ProfessorState(BaseModel):
     test_data_path: str = ""
     sample_submission_path: str = ""
     clean_data_path: str = ""
+    data_usage_report: Dict = Field(default_factory=dict)
     data_hash: str = ""
     target_col: str = ""
     id_columns: List = Field(default_factory=list)
@@ -369,15 +383,9 @@ class ProfessorState(BaseModel):
     reframe_details: Dict = Field(default_factory=dict)
 
     # Pseudo Label
-    pseudo_labels_applied: bool = False
-    pseudo_label_skip_reason: str = ""
-    pseudo_label_halt_reason: str = ""
-    pseudo_label_iterations: int = 0
-    pseudo_label_n_added: int = 0
-    pseudo_label_cv_improvement: float = 0.0
-    pseudo_label_confidence_mean: float = 0.0
-    pseudo_label_confidence_std: float = 0.0
-    pseudo_label_critic_accepted: bool = False
+    pseudo_label_activated: bool = False
+    pseudo_label_fraction: float = 0.0
+    pseudo_label_cv_delta: float = 0.0
     clean_train_with_pseudo_path: str = ""
 
     # Supervisor
@@ -412,8 +420,8 @@ class ProfessorState(BaseModel):
     submission_log: List = Field(default_factory=list)
     submission_freeze_active: bool = False
     submission_freeze_reason: str = ""
-    ewma_current: Optional[float] = None
-    ewma_initial: Optional[float] = None
+    ewma_current: Optional[List] = None
+    ewma_initial: Optional[List] = None
     n_submissions_with_lb: int = 0
     submission_a_path: str = ""
     submission_b_path: str = ""
@@ -421,6 +429,7 @@ class ProfessorState(BaseModel):
     submission_b_model: str = ""
     submission_b_correlation_with_a: float = 0.0
     submission_log_path: str = ""
+    submission_safety_report: Dict = Field(default_factory=dict)
 
     # Cost & Circuit Breaker
     current_node_failure_count: int = 0

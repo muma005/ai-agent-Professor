@@ -147,7 +147,7 @@ _FIELD_OWNERS = {
     "features_dropped": "supervisor",
 
     # Post-Mortem Agent
-    "post_mortem_completed": "post_mortem_agent",
+    "post_mortem_completed": ["post_mortem_agent", "publisher"],
     "post_mortem_report_path": "post_mortem_agent",
     "lb_score": "post_mortem_agent",
     "lb_rank": "post_mortem_agent",
@@ -221,6 +221,9 @@ _FIELD_OWNERS = {
     "debug_decomposition": "sandbox",
     "debug_silent_failures": "sandbox",
     "debug_fix_rate_by_class": "sandbox",
+
+    # Memory Hygiene
+    "memory_hygiene_report": "memory_hygiene",
 
     # External Data Scout
     "external_data_allowed": "data_scout",
@@ -477,6 +480,9 @@ class ProfessorState(BaseModel):
     debug_decomposition: List = Field(default_factory=list)
     debug_silent_failures: List = Field(default_factory=list)
     debug_fix_rate_by_class: Dict = Field(default_factory=dict)
+
+    # Memory Hygiene
+    memory_hygiene_report: Dict = Field(default_factory=dict)
 
     # External Data
     external_data_allowed: bool = False

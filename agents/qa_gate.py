@@ -109,7 +109,7 @@ def run_qa_gate(state: ProfessorState) -> ProfessorState:
     # ── Check 1 & 2: Report quality ───────────────────────────────
     report_path = state.get("report_path")
     if report_path and Path(report_path).exists():
-        html = Path(report_path).read_text()
+        html = Path(report_path).read_text(encoding="utf-8")
 
         unfilled = check_no_unfilled_slots(html)
         if unfilled:

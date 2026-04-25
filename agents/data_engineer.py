@@ -12,6 +12,7 @@ from tools.data_tools import hash_dataset, ensure_session_dirs, profile_data, wr
 from core.preprocessor import TabularPreprocessor
 from guards.agent_retry import with_agent_retry
 from tools.performance_monitor import timed_node
+from tools.operator_channel import emit_to_operator
 
 logger = logging.getLogger(__name__)
 
@@ -126,19 +127,23 @@ def run_data_engineer(state: ProfessorState) -> ProfessorState:
     # 1. Load & Hash
     data_hash = hash_dataset(raw_path)
     
-    # PEAK V2: We read the first few rows to find ID candidates and force them to string
-    # to avoid float inference on alphanumeric IDs (like 0001_01)
-    df_preview = pl.read_csv(raw_path, n_rows=100, ignore_errors=True)
-    print(f"DEBUG: Preview columns: {df_preview.columns}")
-    id_candidates = [c for c in df_preview.columns if "id" in c.lower()]
-    schema_overrides = {c: pl.String for c in id_candidates}
-    
-    df_raw = pl.read_csv(
-        raw_path, 
-        infer_schema_length=10000, 
-        ignore_errors=True,
-        schema_overrides=schema_overrides
-    )
+    if raw_path.endswith(".parquet"):
+        df_raw = pl.read_parquet(raw_path)
+        print(f"DEBUG: Preview columns: {df_raw.columns}")
+    else:
+        # PEAK V2: We read the first few rows to find ID candidates and force them to string
+        # to avoid float inference on alphanumeric IDs (like 0001_01)
+        df_preview = pl.read_csv(raw_path, n_rows=100, ignore_errors=True)
+        print(f"DEBUG: Preview columns: {df_preview.columns}")
+        id_candidates = [c for c in df_preview.columns if "id" in c.lower()]
+        schema_overrides = {c: pl.String for c in id_candidates}
+        
+        df_raw = pl.read_csv(
+            raw_path, 
+            infer_schema_length=10000, 
+            ignore_errors=True,
+            schema_overrides=schema_overrides
+        )
 
     # 2. Detect Metadata
     target_col = _detect_target_col(df_raw, state, raw_path)

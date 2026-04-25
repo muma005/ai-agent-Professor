@@ -2,7 +2,7 @@
 
 import os
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from core.state import ProfessorState
 from guards.agent_retry import with_agent_retry
 from tools.performance_monitor import timed_node
@@ -35,9 +35,11 @@ def run_semantic_router(state: ProfessorState) -> ProfessorState:
     # 2. Define the execution DAG
     dag = [
         "competition_intel",
+        "domain_researcher",
         "data_engineer",
         "eda_agent",
         "validation_architect",
+        "creative_hypothesis",
         "feature_factory",
         "ml_optimizer",
         "ensemble_architect",

@@ -128,7 +128,7 @@ _FIELD_OWNERS = {
     "critic_verdict": "red_team_critic",
     "critic_verdict_path": "red_team_critic",
     "critic_severity": "red_team_critic",
-    "replan_requested": "red_team_critic",
+    "replan_requested": ["red_team_critic", "supervisor"],
     "replan_remove_features": "red_team_critic",
     "replan_rerun_nodes": "red_team_critic",
     "competition_fingerprint": "red_team_critic",

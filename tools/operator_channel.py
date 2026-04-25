@@ -66,9 +66,6 @@ class CLIAdapter(ChannelAdapter):
         if not self.is_tty:
             return None
             
-        # Start a background thread for non-blocking input
-        # Note: In a real CLI, we might use something like `select` or `prompt_toolkit`,
-        # but for a standard script, a thread + input() is common.
         def get_input():
             try:
                 res = input(">> ")
@@ -85,7 +82,7 @@ class CLIAdapter(ChannelAdapter):
             return None
 
     def is_available(self) -> bool:
-        return True # Always print to logs even if not TTY
+        return True
 
 # ── Telegram Adapter ─────────────────────────────────────────────────────────
 
@@ -104,7 +101,6 @@ class TelegramAdapter(ChannelAdapter):
             return
 
         try:
-            # Handle photo if data contains an image path
             if data and "image_path" in data:
                 with open(data["image_path"], "rb") as f:
                     resp = requests.post(
@@ -179,10 +175,10 @@ class CommandListener:
         self.stop_event = threading.Event()
         self.thread = None
         
-        # Shared flags for background commands
         self.pipeline_paused = False
         self.pipeline_aborted = False
         self.injection_queue = queue.Queue()
+        self.last_state: Any = None
 
     def start(self):
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -195,8 +191,6 @@ class CommandListener:
 
     def _run(self):
         while not self.stop_event.is_set():
-            # Long poll across all channels
-            # Note: For simplicity, we poll them in sequence with a short timeout
             response = self.manager.poll_any(timeout=2)
             if response:
                 self._classify_command(response)
@@ -213,14 +207,15 @@ class CommandListener:
             self.pipeline_aborted = True
             self.manager.send_all("🛑 Pipeline abortion requested.", "STATUS")
         elif text.startswith("/status"):
-            # This will be handled by the next transition hook reading state
             self.injection_queue.put({"type": "command", "cmd": "status"})
+        elif text.startswith("/freeform "):
+            prompt = text[len("/freeform "):].strip()
+            self._handle_freeform_command(prompt)
         elif text.startswith("/feature "):
             hint = text[len("/feature "):].strip()
             self.injection_queue.put({"type": "feature_hint", "text": hint})
             self.manager.send_all(f"📝 Feature hint recorded: {hint}", "STATUS")
         elif text.startswith("/override "):
-            # Format: /override field_name value
             parts = text[len("/override "):].strip().split(" ", 1)
             if len(parts) == 2:
                 self.injection_queue.put({"type": "override", "field": parts[0], "value": parts[1]})
@@ -230,9 +225,38 @@ class CommandListener:
             self.injection_queue.put({"type": "skip", "agent": agent})
             self.manager.send_all(f"⏭️ Skip queued for: {agent}", "STATUS")
         elif not text.startswith("/"):
-            # Domain knowledge injection
             self.injection_queue.put({"type": "domain", "text": text})
             self.manager.send_all(f"🧠 Domain knowledge recorded: {text}", "STATUS")
+
+    def _handle_freeform_command(self, prompt: str):
+        """Spawns a background thread for standalone ML execution."""
+        if not self.last_state:
+            self.manager.send_all("❌ Cannot run freeform: No system state captured yet.", "ERROR")
+            return
+
+        def bg_worker():
+            try:
+                from tools.freeform_sandbox import run_freeform_execution
+                state = self.last_state
+                # Extract paths safely
+                train_path = state.get("feature_data_path") or state.get("clean_data_path") or ""
+                test_path = state.get("test_data_path") or ""
+                
+                run_freeform_execution(
+                    prompt=prompt,
+                    session_id=state.get("session_id", "default"),
+                    train_path=train_path,
+                    test_path=test_path,
+                    target_col=state.get("target_col", ""),
+                    task_type=state.get("task_type", "classification")
+                )
+            except Exception as e:
+                logger.error(f"Freeform background worker failed: {e}")
+                self.manager.send_all(f"❌ Freeform worker crash: {e}", "ERROR")
+
+        t = threading.Thread(target=bg_worker, daemon=True)
+        t.start()
+        self.manager.send_all(f"⚡ Freeform execution started in background: '{prompt}'", "STATUS")
 
 class ChannelManager:
     def __init__(self, channels: List[str], config: dict):
@@ -259,10 +283,8 @@ class ChannelManager:
             adapter.send(formatted_msg, level, data)
 
     def poll_any(self, timeout: int) -> Optional[str]:
-        # Simple implementation: poll each and return first
-        # In multi-channel, we could use threads to poll simultaneously
         for adapter in self.adapters:
-            res = adapter.poll_response(timeout=1) # short poll
+            res = adapter.poll_response(timeout=1)
             if res:
                 return res
         return None
@@ -289,7 +311,6 @@ def emit_to_operator(message: str, level: str = "STATUS", data: dict = None) -> 
         
     _MANAGER.send_all(message, level, data)
     
-    # Behavior based on level
     if level in ["STATUS", "RESULT"]:
         return None
         
@@ -300,7 +321,6 @@ def emit_to_operator(message: str, level: str = "STATUS", data: dict = None) -> 
         return _MANAGER.poll_any(timeout=900)
         
     if level == "ESCALATION":
-        # Block indefinitely until response
         while True:
             res = _MANAGER.poll_any(timeout=10)
             if res:
@@ -308,42 +328,42 @@ def emit_to_operator(message: str, level: str = "STATUS", data: dict = None) -> 
             time.sleep(1)
 
 def process_pending_injections(state: Any) -> Any:
-    """Checks the injection queue and applies items to state."""
     if not _MANAGER:
         return state
+    
+    # Cache state for the background listener (freeform needs paths)
+    _MANAGER.listener.last_state = state
         
     updated_fields = {}
     
     while not _MANAGER.listener.injection_queue.empty():
         item = _MANAGER.listener.injection_queue.get()
-        t_str = datetime.now().isoformat()
+        t_str = datetime.now(timezone.utc).isoformat()
         
         if item["type"] == "domain":
-            injections = state.get("hitl_injections", [])
+            injections = state.get("hitl_injections") or []
             injections.append({"text": item["text"], "timestamp": t_str, "injected_into_agents": []})
             updated_fields["hitl_injections"] = injections
             
         elif item["type"] == "feature_hint":
-            hints = state.get("hitl_feature_hints", [])
+            hints = state.get("hitl_feature_hints") or []
             hints.append({"text": item["text"], "status": "pending", "rejection_reason": ""})
             updated_fields["hitl_feature_hints"] = hints
             
         elif item["type"] == "override":
-            overrides = state.get("hitl_overrides", {})
+            overrides = state.get("hitl_overrides") or {}
             overrides[item["field"]] = item["value"]
             updated_fields["hitl_overrides"] = overrides
             
         elif item["type"] == "skip":
-            skips = state.get("hitl_skip_agents", [])
+            skips = state.get("hitl_skip_agents") or []
             skips.append(item["agent"])
             updated_fields["hitl_skip_agents"] = skips
 
-    # Apply flags
     updated_fields["pipeline_paused"] = _MANAGER.listener.pipeline_paused
     updated_fields["pipeline_aborted"] = _MANAGER.listener.pipeline_aborted
 
     if updated_fields:
-        # Import state here to avoid circular dependency
         from core.state import ProfessorState
         return ProfessorState.validated_update(state, "hitl_listener", updated_fields)
         

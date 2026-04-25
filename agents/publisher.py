@@ -28,12 +28,30 @@ def run_publisher(state: ProfessorState) -> ProfessorState:
     emit_to_operator("🏁 Pipeline Finalizing... Generating Publisher Report.", level="STATUS")
 
     # 1. Gather Summary Data
-    eda_summary = state.get("eda_insights_summary", "None")
-    cv_mean = state.get("cv_mean", 0.0)
+    cv_mean = state.get("cv_mean")
+    cv_str = f"{cv_mean:.4f}" if cv_mean is not None else "N/A"
     best_model = state.get("best_model_type", "None")
     n_features = len(state.get("feature_order", []))
     pseudo_active = state.get("pseudo_label_activated", False)
+    depth = str(state.get("pipeline_depth", "unknown")).upper()
     
+    # ── Commit 3: Solution Provenance ──
+    from tools.solution_assembler import assemble_standalone_solution
+    from tools.code_ledger import CodeLedger
+    try:
+        ledger = CodeLedger(session_id)
+        winning_sequence = ledger.get_winning_sequence()
+        
+        assemble_standalone_solution(
+            session_id=session_id,
+            winning_sequence=winning_sequence,
+            train_path=state.get("feature_data_path") or state.get("clean_data_path") or "",
+            test_path=state.get("test_data_path") or "",
+            target_col=state.get("target_col", "")
+        )
+    except Exception as e:
+        logger.warning(f"[{AGENT_NAME}] Solution assembly failed: {e}")
+
     # 2. Artifact Verification
     sub_path = state.get("submission_path")
     sub_exists = sub_path and os.path.exists(sub_path)
@@ -54,10 +72,10 @@ def run_publisher(state: ProfessorState) -> ProfessorState:
 📊 PIPELINE SUMMARY:
 - Task: {state.get('task_type')}
 - Best Model: {best_model}
-- CV Score: {cv_mean:.4f}
+- CV Score: {cv_str}
 - Features: {n_features} implemented
 - Pseudo-labeling: {'✅ Active' if pseudo_active else '❌ Inactive'}
-- Depth: {state.get('pipeline_depth').upper()}
+- Depth: {depth}
 
 💰 RESOURCE REPORT:
 - LLM Calls: {llm_calls}
@@ -75,8 +93,12 @@ Session complete. Standalone solution is ready for reproduction.
 
     # 6. Final State Update
     report_file = output_dir / "final_report.txt"
-    with open(report_file, "w", encoding="utf-8") as f:
-        f.write(report)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(report_file, "w", encoding="utf-8") as f:
+            f.write(report)
+    except Exception as e:
+        logger.error(f"[{AGENT_NAME}] Could not write report file: {e}")
 
     updates = {
         "post_mortem_completed": True,

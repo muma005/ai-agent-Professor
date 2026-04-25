@@ -43,12 +43,10 @@ def llm_call(
         # Exponential backoff
         for retry in range(2):
             try:
-                # Stub: Using the existing client logic but wrapped
-                # Note: In a real implementation, we'd map p_cfg to client calls
-                response = llm_client.llm_call(
+                # Use the existing client logic but wrapped
+                response = llm_client.call_llm(
                     prompt=prompt,
-                    system_prompt=system_prompt,
-                    temperature=temperature,
+                    system=system_prompt,
                     max_tokens=max_tokens
                 )
                 

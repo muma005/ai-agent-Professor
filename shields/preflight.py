@@ -10,6 +10,8 @@ from typing import Dict, List, Any, Optional, Tuple
 from core.state import ProfessorState
 from tools.operator_channel import emit_to_operator
 from graph.depth_router import classify_pipeline_depth
+from guards.agent_retry import with_agent_retry
+from tools.performance_monitor import timed_node
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +35,7 @@ def _estimate_row_count(file_path: str) -> int:
         sample = pl.read_csv(file_path, n_rows=100, ignore_errors=True)
         if len(sample) == 0: return 0
         
-        # Estimate avg row size
-        avg_row_bytes = file_size / (file_size / (len(sample.write_csv().encode()) / len(sample))) # Very approximate
-        # Simpler:
+        # Simple:
         sample_bytes = len(pl.read_csv(file_path, n_rows=500).write_csv().encode())
         avg_row_bytes = sample_bytes / 500
         return int(file_size / avg_row_bytes)
@@ -43,9 +43,6 @@ def _estimate_row_count(file_path: str) -> int:
         return 1000 # Fallback
 
 def _check_operator_depth_override(state: ProfessorState) -> Optional[str]:
-    # Placeholder for checking HITL injections or initial config
-    config = state.get("config")
-    # (Actual implementation would check command line args or HITL buffer)
     return None
 
 # ── Sub-function 1: _inventory_data_files ───────────────────────────────────
@@ -162,11 +159,8 @@ def _profile_columns(file_path: str, n_rows: int = 100) -> List[Dict]:
             flags.append({"type": "mostly_null", "description": f"{null_pct}% null"})
             
         return {
-            "name": col,
-            "dtype": str(df[col].dtype),
-            "n_unique_in_sample": n_unique,
-            "null_pct_in_sample": null_pct,
-            "flags": flags
+            "name": col, "dtype": str(df[col].dtype), "n_unique_in_sample": n_unique,
+            "null_pct_in_sample": null_pct, "flags": flags
         }
 
     profiles = []
@@ -179,7 +173,6 @@ def _profile_columns(file_path: str, n_rows: int = 100) -> List[Dict]:
                 if f["type"] not in existing_flag_types:
                     head_prof["flags"].append(f)
         profiles.append(head_prof)
-        
     return profiles
 
 # ── Sub-function 3: _verify_submission_format ────────────────────────────────
@@ -193,18 +186,11 @@ def _verify_submission_format(data_dir: str) -> Dict:
             ext = os.path.splitext(filename)[1].lower()
             if ext == ".json":
                 return {"format": "json", "compatible": False, "issues": ["JSON submission format not supported"]}
-            
             try:
                 df = pl.read_csv(path) if ext in (".csv", ".tsv") else pl.read_parquet(path)
-                return {
-                    "format": ext.strip("."),
-                    "columns": df.columns,
-                    "n_rows": len(df),
-                    "compatible": True
-                }
+                return {"format": ext.strip("."), "columns": df.columns, "n_rows": len(df), "compatible": True}
             except:
                 pass
-                
     return {"format": "unknown", "compatible": True, "issues": ["No sample submission found"]}
 
 # ── Sub-function 4: _detect_target_type ──────────────────────────────────────
@@ -212,7 +198,6 @@ def _verify_submission_format(data_dir: str) -> Dict:
 def _detect_target_type(file_path: str, target_col: str) -> str:
     """Determine target type based on sample distribution."""
     if not target_col or not os.path.exists(file_path): return "unknown"
-    
     try:
         df = pl.read_parquet(file_path) if file_path.endswith(".parquet") else pl.read_csv(file_path, n_rows=1000)
         if target_col not in df.columns: return "unknown"
@@ -226,6 +211,8 @@ def _detect_target_type(file_path: str, target_col: str) -> str:
 
 # ── Agent Node ───────────────────────────────────────────────────────────────
 
+@timed_node
+@with_agent_retry(AGENT_NAME)
 def run_preflight_checks(state: ProfessorState) -> ProfessorState:
     """
     Shield 6: Comprehensive Pre-flight Audit with Depth Routing.
@@ -237,20 +224,15 @@ def run_preflight_checks(state: ProfessorState) -> ProfessorState:
         return state.validated_update(state, AGENT_NAME, {"preflight_passed": False, "preflight_warnings": ["raw_data_path not set"]})
 
     raw_dir = os.path.dirname(raw_data_path) or "."
-    
-    # 1. Inventory & Profiling
     inventory, total_mb, inv_warnings = _inventory_data_files(raw_dir)
     profiles = _profile_columns(raw_data_path)
     sub_format = _verify_submission_format(raw_dir)
     target_type = _detect_target_type(raw_data_path, state.get("target_col", ""))
-    
-    # 2. Row Count Estimation
     n_rows = _estimate_row_count(raw_data_path)
     n_features = len(profiles)
 
     # 3. Depth Classification
     all_warnings = inv_warnings + [f for p in profiles for f in p["flags"]]
-    
     contract = state.get("metric_contract")
     if contract:
         metric_name = contract.get("scorer_name", "unknown") if isinstance(contract, dict) else getattr(contract, "scorer_name", "unknown")
@@ -268,7 +250,6 @@ def run_preflight_checks(state: ProfessorState) -> ProfessorState:
         operator_override=_check_operator_depth_override(state),
     )
     
-    # 4. Capability Boundaries
     unsupported = []
     blocking_warnings = []
     for p in profiles:
@@ -280,8 +261,6 @@ def run_preflight_checks(state: ProfessorState) -> ProfessorState:
     if total_mb > 10000: blocking_warnings.append("Dataset exceeds 10GB boundary.")
 
     passed = len(blocking_warnings) == 0
-    
-    # 5. Milestone 0 Report
     msg = f"🚀 PRE-FLIGHT REPORT\n\n📁 Total Size: {total_mb}MB\n📊 Rows ≈ {n_rows}\n📈 Features: {n_features}\n🎯 Target Type: {target_type}\n📤 Format: {sub_format['format']}\n\n⚡ Pipeline Depth: {depth_result['depth'].upper()} ({'auto-detected' if depth_result['auto_detected'] else 'override'})\n   Reason: {depth_result['reason']}\n   Skipping: {', '.join(depth_result['agents_skipped']) if depth_result['agents_skipped'] else 'None'}\n\n✅ Passed: {passed}"
     emit_to_operator(msg, level="CHECKPOINT")
 

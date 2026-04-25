@@ -164,17 +164,19 @@ def timed_node(func: Callable) -> Callable:
             
             # Add timing to state for downstream tracking
             if result is None:
-                result = {}
+                result = state
             
-            # Initialize performance_log if not present
-            if "performance_log" not in state:
-                state["performance_log"] = []
+            # Use ProfessorState.validated_update if result is an object
+            perf_log = state.get("performance_log", []) + [timing.to_dict()]
             
-            # Append timing (don't mutate input state dict)
-            result = dict(result)
-            result["performance_log"] = state.get("performance_log", []) + [timing.to_dict()]
-            
-            return result
+            from core.state import ProfessorState
+            if isinstance(result, ProfessorState):
+                return ProfessorState.validated_update(result, "graph builder", {"performance_log": perf_log})
+            else:
+                # Fallback for legacy dict states
+                result = dict(result)
+                result["performance_log"] = perf_log
+                return result
             
         except Exception as e:
             # Record failure timing and memory

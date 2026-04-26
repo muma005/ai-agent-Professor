@@ -29,8 +29,9 @@ class TestSolutionProvenanceContract:
 
     def test_ledger_tracks_provenance(self, tmp_path):
         """Verify ledger correctly stores and retrieves entries."""
-        # Use a real path instead of mocking os.path.join which causes recursion
-        ledger = CodeLedger("test-session")
+        import time
+        session_id = f"test-session-{int(time.time())}"
+        ledger = CodeLedger(session_id)
         ledger.output_dir = str(tmp_path)
         ledger.ledger_path = os.path.join(str(tmp_path), "code_ledger.json")
         
@@ -42,7 +43,7 @@ class TestSolutionProvenanceContract:
         assert entry_id.startswith("ledger_")
         assert len(ledger.entries) == 1
         assert ledger.entries[0].is_winning_component is True
-        assert os.path.exists(ledger.ledger_path)
+        assert os.path.exists(os.path.join(ledger.session_dir, "code_ledger.jsonl"))
 
     @patch("tools.solution_assembler.llm_call")
     def test_assembler_compiles_standalone_notebook(self, mock_llm, mock_ledger_entries, tmp_path):

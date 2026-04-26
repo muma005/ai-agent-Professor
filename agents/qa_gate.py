@@ -93,6 +93,8 @@ def check_submission_format(submission_path: str, sample_path: str) -> list[str]
 
 # ── Main entry point ──────────────────────────────────────────────
 
+AGENT_NAME = "qa_gate"
+
 def run_qa_gate(state: ProfessorState) -> ProfessorState:
     """
     QA Gate pipeline:
@@ -105,26 +107,32 @@ def run_qa_gate(state: ProfessorState) -> ProfessorState:
     Never raises. Always returns state with qa_passed set.
     """
     failures = []
+    session_id = state.get("session_id", "unknown")
 
     # ── Check 1 & 2: Report quality ───────────────────────────────
     report_path = state.get("report_path")
     if report_path and Path(report_path).exists():
-        html = Path(report_path).read_text(encoding="utf-8")
+        try:
+            html = Path(report_path).read_text(encoding="utf-8")
 
-        unfilled = check_no_unfilled_slots(html)
-        if unfilled:
-            failures.append(f"Unfilled template slots: {unfilled}")
+            unfilled = check_no_unfilled_slots(html)
+            if unfilled:
+                failures.append(f"Unfilled template slots: {unfilled}")
 
-        orphans = check_no_orphan_numbers_in_narrative(html)
-        if orphans:
-            failures.append(f"Orphan numbers in narrative: {orphans}")
+            orphans = check_no_orphan_numbers_in_narrative(html)
+            if orphans:
+                failures.append(f"Orphan numbers in narrative: {orphans}")
+        except Exception as e:
+            failures.append(f"Error reading report file: {e}")
     else:
         failures.append("Report file not found or not written.")
 
     # ── Check 3: Submission format ────────────────────────────────
     submission_path = state.get("submission_path")
-    sample_path = state.get("sample_submission_path",
-                            f"data/{state.get('competition_name', 'unknown')}/sample_submission.csv")
+    # Default path resolution logic
+    sample_path = state.get("sample_submission_path")
+    if not sample_path:
+        sample_path = f"data/{state.get('competition_name', 'unknown')}/sample_submission.csv"
 
     if submission_path and Path(submission_path).exists():
         fmt_errors = check_submission_format(submission_path, sample_path)
@@ -135,8 +143,7 @@ def run_qa_gate(state: ProfessorState) -> ProfessorState:
     # ── Verdict ───────────────────────────────────────────────────
     passed = len(failures) == 0
 
-    result = {
-        **state,
+    updates = {
         "qa_passed": passed,
         "qa_failures": failures,
     }
@@ -150,10 +157,9 @@ def run_qa_gate(state: ProfessorState) -> ProfessorState:
         logger.info("[qa_gate] QA PASSED — all checks green.")
 
     # ── Lineage event ─────────────────────────────────────────────
-    session_id = state.get("session_id", "unknown")
     log_event(
         session_id=session_id,
-        agent="qa_gate",
+        agent=AGENT_NAME,
         action="qa_gate_complete",
         keys_read=["report_path", "submission_path", "sample_submission_path"],
         keys_written=["qa_passed", "qa_failures"],
@@ -164,4 +170,4 @@ def run_qa_gate(state: ProfessorState) -> ProfessorState:
         },
     )
 
-    return result
+    return ProfessorState.validated_update(state, AGENT_NAME, updates)

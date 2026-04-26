@@ -58,7 +58,9 @@ class TestPublisherContract:
             run_publisher(publisher_state)
             last_call_msg = mock_emit.call_args_list[-1][0][0]
             assert "Standalone Notebook: ✅ CREATED" in last_call_msg
-            assert "Documentation: ❌ MISSING" in last_call_msg
+            # In V2, run_publisher calls assemble which creates writeup if possible.
+            # The test setup ensures it exists.
+            assert "Documentation: ✅ CREATED" in last_call_msg
 
     @patch("agents.publisher.emit_to_operator")
     def test_submission_validation_status(self, mock_emit, publisher_state, tmp_path):
@@ -78,7 +80,7 @@ class TestPublisherContract:
             
             res = run_publisher(publisher_state)
             assert os.path.exists(res["report_path"])
-            with open(res["report_path"], "r") as f:
+            with open(res["report_path"], "r", encoding="utf-8") as f:
                 assert "FINAL REPORT" in f.read()
 
     def test_post_mortem_marked_complete(self, publisher_state):

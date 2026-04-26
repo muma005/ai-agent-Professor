@@ -24,6 +24,7 @@ def run_publisher(state: ProfessorState) -> ProfessorState:
     """
     session_id = state.get("session_id", "default")
     output_dir = Path(f"outputs/{session_id}")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     emit_to_operator("🏁 Pipeline Finalizing... Generating Publisher Report.", level="STATUS")
 
@@ -35,22 +36,17 @@ def run_publisher(state: ProfessorState) -> ProfessorState:
     pseudo_active = state.get("pseudo_label_activated", False)
     depth = str(state.get("pipeline_depth", "unknown")).upper()
     
-    # ── Commit 3: Solution Provenance ──
-    from tools.solution_assembler import assemble_standalone_solution
-    from tools.code_ledger import CodeLedger
+    # ── Commit 3: Solution Provenance (Upgrade to V2) ──
+    from tools.solution_assembler import assemble_solution_notebook, generate_requirements, generate_writeup
     try:
-        ledger = CodeLedger(session_id)
-        winning_sequence = ledger.get_winning_sequence()
-        
-        assemble_standalone_solution(
-            session_id=session_id,
-            winning_sequence=winning_sequence,
-            train_path=state.get("feature_data_path") or state.get("clean_data_path") or "",
-            test_path=state.get("test_data_path") or "",
-            target_col=state.get("target_col", "")
-        )
+        session_dir = str(output_dir)
+        script_path = assemble_solution_notebook(state, session_dir)
+        generate_requirements(script_path, session_dir)
+        generate_writeup(state, session_dir)
     except Exception as e:
         logger.warning(f"[{AGENT_NAME}] Solution assembly failed: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
 
     # 2. Artifact Verification
     sub_path = state.get("submission_path")
@@ -62,9 +58,8 @@ def run_publisher(state: ProfessorState) -> ProfessorState:
     llm_calls = cost_data.get("llm_calls", 0)
     
     # 4. Provenance Links
-    solution_dir = output_dir / "solution"
-    script_exists = os.path.exists(solution_dir / "solution_notebook.py")
-    writeup_exists = os.path.exists(solution_dir / "solution_writeup.md")
+    script_exists = (output_dir / "solution" / "solution_notebook.py").exists()
+    writeup_exists = (output_dir / "solution" / "solution_writeup.md").exists()
 
     # 5. Build Milestone 4 Report
     report = f"""🏆 PROFESSOR v2.0 FINAL REPORT — {session_id}
@@ -94,7 +89,7 @@ Session complete. Standalone solution is ready for reproduction.
     # 6. Final State Update
     report_file = output_dir / "final_report.txt"
     try:
-        os.makedirs(output_dir, exist_ok=True)
+        # Explicit encoding to avoid Windows charmap issues
         with open(report_file, "w", encoding="utf-8") as f:
             f.write(report)
     except Exception as e:

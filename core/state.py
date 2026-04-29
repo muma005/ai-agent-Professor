@@ -238,6 +238,13 @@ _FIELD_OWNERS = {
 
     # Config
     "config": "supervisor",
+
+    # Hackathon Mode
+    "competition_description": "competition_intel",
+    "hackathon_mode": "rubric_parser",
+    "hackathon_rubric": "rubric_parser",
+    "hackathon_effort_plan": "rubric_parser",
+    "hackathon_writeup_template": "rubric_parser",
 }
 
 _IMMUTABLE_FIELDS = {
@@ -289,6 +296,7 @@ class ProfessorState(BaseModel):
     adversarial_auc: float = 0.5
     drift_report: Dict = Field(default_factory=dict)
     drift_report_path: str = ""
+    competition_description: str = "" # Hackathon field
 
     # Pre-flight
     preflight_passed: bool = False
@@ -497,6 +505,12 @@ class ProfessorState(BaseModel):
 
     # Config
     config: ProfessorConfig = Field(default_factory=ProfessorConfig)
+
+    # Hackathon Mode
+    hackathon_mode: bool = False
+    hackathon_rubric: Dict = Field(default_factory=dict)
+    hackathon_effort_plan: Dict = Field(default_factory=dict)
+    hackathon_writeup_template: Dict = Field(default_factory=dict)
 
     # ── Legacy Mapping Protocol ──────────────────────────────────────────────
 

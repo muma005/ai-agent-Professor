@@ -72,6 +72,7 @@ _FIELD_OWNERS = {
     "canonical_train_rows": "data_engineer",
     "canonical_test_rows": "data_engineer",
     "canonical_schema": "data_engineer",
+    "data_schema": "data_engineer",
     "canonical_target_stats": "data_engineer",
     "test_data_checksum": "data_engineer",
 
@@ -248,6 +249,13 @@ _FIELD_OWNERS = {
     "thesis_candidates": "thesis_generator",
     "active_thesis": "thesis_generator",
     "thesis_selected_by": "thesis_generator",
+    "external_datasets": "external_data_scout",
+    "external_data_paths": "external_data_scout",
+    "thesis_data_sufficient": "external_data_scout",
+    "enriched_data_path": "external_data_scout",
+    "narrative_plots": "narrative_engine",
+    "thesis_effect_sizes": ["feature_factory", "creative_hypothesis", "narrative_engine"],
+    "hackathon_writeup_path": "narrative_engine",
 }
 
 _IMMUTABLE_FIELDS = {
@@ -300,6 +308,8 @@ class ProfessorState(BaseModel):
     drift_report: Dict = Field(default_factory=dict)
     drift_report_path: str = ""
     competition_description: str = "" # Hackathon field
+    domain_classification: str = ""
+    domain_brief: Dict = Field(default_factory=dict)
 
     # Pre-flight
     preflight_passed: bool = False
@@ -317,6 +327,7 @@ class ProfessorState(BaseModel):
     clean_data_path: str = ""
     data_usage_report: Dict = Field(default_factory=dict)
     data_hash: str = ""
+    data_schema: Dict = Field(default_factory=dict)
     target_col: str = ""
     id_columns: List = Field(default_factory=list)
     schema_path: Optional[str] = None
@@ -514,6 +525,16 @@ class ProfessorState(BaseModel):
     hackathon_rubric: Dict = Field(default_factory=dict)
     hackathon_effort_plan: Dict = Field(default_factory=dict)
     hackathon_writeup_template: Dict = Field(default_factory=dict)
+    thesis_candidates: List[Dict] = Field(default_factory=list)
+    active_thesis: Optional[Dict] = None
+    thesis_selected_by: str = "auto"
+    external_datasets: List[Dict] = Field(default_factory=list)
+    external_data_paths: List[str] = Field(default_factory=list)
+    thesis_data_sufficient: bool = False
+    enriched_data_path: str = ""
+    narrative_plots: List[Dict] = Field(default_factory=list)
+    thesis_effect_sizes: Dict = Field(default_factory=dict)
+    hackathon_writeup_path: str = ""
 
     # ── Legacy Mapping Protocol ──────────────────────────────────────────────
 

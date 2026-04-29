@@ -245,6 +245,9 @@ _FIELD_OWNERS = {
     "hackathon_rubric": "rubric_parser",
     "hackathon_effort_plan": "rubric_parser",
     "hackathon_writeup_template": "rubric_parser",
+    "thesis_candidates": "thesis_generator",
+    "active_thesis": "thesis_generator",
+    "thesis_selected_by": "thesis_generator",
 }
 
 _IMMUTABLE_FIELDS = {

@@ -255,6 +255,7 @@ _FIELD_OWNERS = {
     "enriched_data_path": "external_data_scout",
     "narrative_plots": "narrative_engine",
     "thesis_effect_sizes": ["feature_factory", "creative_hypothesis", "narrative_engine"],
+    "thesis_features_by_category": "feature_factory",
     "hackathon_writeup_path": "narrative_engine",
 }
 
@@ -534,6 +535,7 @@ class ProfessorState(BaseModel):
     enriched_data_path: str = ""
     narrative_plots: List[Dict] = Field(default_factory=list)
     thesis_effect_sizes: Dict = Field(default_factory=dict)
+    thesis_features_by_category: Dict = Field(default_factory=dict)
     hackathon_writeup_path: str = ""
 
     # ── Legacy Mapping Protocol ──────────────────────────────────────────────

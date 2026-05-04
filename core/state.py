@@ -105,7 +105,7 @@ _FIELD_OWNERS = {
     "cv_strategy": "validation_architect",
     "metric_contract": "validation_architect",
     "gate_config": "validation_architect",
-    "hitl_required": ["validation_architect", "hitl_listener"],
+    "hitl_required": ["validation_architect", "hitl_listener", "supervisor"],
     "hitl_reason": ["validation_architect", "hitl_listener"],
 
     # ML Optimizer
@@ -694,3 +694,4 @@ def initial_state(*args, **kwargs) -> Dict[str, Any]:
 
     state = ProfessorState(**data)
     return state.model_dump()
+

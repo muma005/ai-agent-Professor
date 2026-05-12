@@ -16,6 +16,7 @@ DANGER_PATTERNS = [
     (r"TargetEncoder\(\)\.fit\((?!.*train)", "TargetEncoder fit outside CV fold"),
     (r"LabelEncoder\(\)\.fit\(.*(?:concat|vstack)", "LabelEncoder fit on combined train+test"),
     (r"\.fit\(.*(?:concat|vstack|rbind)", "fit on concatenated train+test data"),
+    (r"\.fit\(combined", "fit on variable named 'combined' (likely train+test)"),
 ]
 
 # ── Safe pattern whitelist — lines matching these are NOT flagged ────────────
